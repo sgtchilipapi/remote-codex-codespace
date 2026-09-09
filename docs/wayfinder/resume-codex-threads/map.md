@@ -15,18 +15,16 @@ An implementation-ready specification for discovering, inspecting, selecting, an
 - The installed Codex app-server exposes `thread/list`, `thread/read`, and paginated Turn/item operations; the existing Relay already continues a known Thread ID through `codex exec resume`.
 - Preserve the responsive and interaction contract decided by [Make the Mobile Client work well on narrow screens](../mobile-friendly-client/map.md).
 - Prefer the smallest useful parity with Codex CLI `/resume`; do not broaden this into general Thread administration without an explicit decision.
+- The user pre-accepts the agent's minimal recommendations for the remaining specification; ask only when no safe minimal default exists.
 
 ## Decisions so far
 
-None.
+- [Define useful parity with Codex CLI resume](tickets/01-define-resume-parity.md): Provide a working-directory-scoped, recency-ordered picker for recognizable interactive Threads, with authoritative paginated history and explicit continuation, while omitting search and terminal-oriented CLI affordances.
+- [Complete the minimal Thread resume specification](tickets/02-design-compact-resume-picker.md): Reuse compact focus mode around a three-route, app-server-backed resume flow with atomic selection, bounded pagination, persisted configuration, safe recovery, and proportionate acceptance coverage.
 
 ## Not yet specified
 
-- How the resume picker should fit the compact Mobile Client and coexist with **New**, Configuration, and the active Thread.
-- Which Codex Thread metadata and history are necessary to recognize a Thread before selecting it and to hydrate it after selection.
-- The Relay/app-server lifecycle, API surface, pagination, caching, and failure behavior needed to expose Codespace-persisted Threads safely.
-- What happens when a Thread is missing, corrupt, already active, from another working directory, or cannot be resumed by the installed Codex version.
-- The automated and real-device acceptance contract, including parity boundaries with the CLI and regression coverage for creating new Threads.
+None.
 
 ## Out of scope
 
@@ -36,4 +34,4 @@ None.
 
 ## Open child tickets
 
-1. [Define useful parity with Codex CLI resume](tickets/01-define-resume-parity.md)
+None.

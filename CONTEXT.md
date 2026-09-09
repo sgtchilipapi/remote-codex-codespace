@@ -24,6 +24,10 @@ _Avoid_: Command, job, request
 A sequence of related Turns whose context is retained by Codex.
 _Avoid_: Session, conversation
 
+**Eligible Thread**:
+A persisted, non-archived interactive Thread with recognizable user content whose working directory exactly matches the Relay's configured Codespace working directory.
+_Avoid_: Resumable session, cross-workspace Thread
+
 **Configuration panel**:
 The collapsible area of the Mobile Client where the user stages the API token, model, reasoning effort, and permissions for subsequent Turns.
 _Avoid_: Settings page, navigation drawer
