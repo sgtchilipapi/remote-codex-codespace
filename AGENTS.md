@@ -2,7 +2,7 @@
 
 ### Issue tracker
 
-Issues are tracked in this repository's GitHub Issues. See `docs/agents/issue-tracker.md`.
+Issues are tracked as local Markdown files in this repository. Read `docs/agents/issue-tracker.md` before creating, triaging, claiming, resolving, or wayfinding issues.
 
 ### Triage labels
 

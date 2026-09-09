@@ -23,3 +23,7 @@ _Avoid_: Command, job, request
 **Thread**:
 A sequence of related Turns whose context is retained by Codex.
 _Avoid_: Session, conversation
+
+**Configuration panel**:
+The collapsible area of the Mobile Client where the user stages the API token, model, reasoning effort, and permissions for subsequent Turns.
+_Avoid_: Settings page, navigation drawer
