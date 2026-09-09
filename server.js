@@ -17,9 +17,13 @@ app.get("/test", (req, res) => {
     "gh",
     [
       "codespace",
-      "list",
-      "--json",
-      "name,state"
+      "ssh",
+      "-d",
+      "--debug-file",
+      "/tmp/ssh-debug.log",
+      "-c",
+      codespace,
+      "hostname && pwd"
     ],
     (error, stdout, stderr) => {
       if (error) {
