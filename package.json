@@ -21,5 +21,8 @@
   "homepage": "https://github.com/sgtchilipapi/remote-codex-codespace#readme",
   "dependencies": {
     "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0"
   }
 }
