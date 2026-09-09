@@ -20,6 +20,60 @@ function run(command) {
   });
 }
 
+function codexInfo() {
+  return new Promise((resolve, reject) => {
+    const child = run("codex app-server --stdio");
+    const results = {};
+    let buffer = "";
+    let stderr = "";
+
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk;
+      const lines = buffer.split("\n");
+      buffer = lines.pop();
+      for (const line of lines) {
+        const message = JSON.parse(line);
+        if (message.error) return reject(new Error(message.error.message));
+        if (message.id === 1) {
+          child.stdin.write('{"method":"initialized"}\n');
+          child.stdin.write('{"id":2,"method":"model/list","params":{"limit":100}}\n');
+          child.stdin.write('{"id":3,"method":"account/rateLimits/read"}\n');
+        }
+        if (message.id === 2) results.models = message.result.data;
+        if (message.id === 3) results.rateLimits = message.result.rateLimits;
+        if (results.models && results.rateLimits) {
+          child.kill();
+          resolve(results);
+        }
+      }
+    });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", reject);
+    child.on("close", () => {
+      if (!results.models || !results.rateLimits) reject(new Error(stderr || "Codex info unavailable"));
+    });
+    child.stdin.write('{"id":1,"method":"initialize","params":{"clientInfo":{"name":"relay","version":"1"}}}\n');
+  });
+}
+
+app.get("/info", authorize, async (_req, res) => {
+  try {
+    const { models, rateLimits } = await codexInfo();
+    res.json({
+      models: models.map((item) => ({
+        id: item.id,
+        name: item.displayName,
+        isDefault: item.isDefault,
+        defaultReasoning: item.defaultReasoningEffort,
+        reasoning: item.supportedReasoningEfforts.map(({ reasoningEffort }) => reasoningEffort),
+      })),
+      rateLimits,
+    });
+  } catch (error) {
+    res.status(502).json({ error: error.message });
+  }
+});
+
 app.get("/test", authorize, (_req, res) => {
   const child = run("hostname && pwd");
   let stdout = "";
@@ -47,7 +101,7 @@ app.post("/turn", authorize, (req, res) => {
   if (model && !/^[A-Za-z0-9._-]+$/.test(model)) {
     return res.status(400).json({ error: "model is invalid" });
   }
-  if (reasoning && !["low", "medium", "high", "xhigh", "max"].includes(reasoning)) {
+  if (reasoning && !["low", "medium", "high", "xhigh", "max", "ultra"].includes(reasoning)) {
     return res.status(400).json({ error: "reasoning is invalid" });
   }
   if (permissions && !["read-only", "workspace-write"].includes(permissions)) {

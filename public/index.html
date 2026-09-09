@@ -33,14 +33,11 @@
     <nav>
       <button id="new" type="button">New</button>
       <button id="show-status" type="button">Status</button>
-      <input id="model" placeholder="Default model" aria-label="Model">
+      <select id="model" aria-label="Model">
+        <option value="">Load models</option>
+      </select>
       <select id="reasoning" aria-label="Reasoning">
         <option value="">Default reasoning</option>
-        <option>low</option>
-        <option>medium</option>
-        <option>high</option>
-        <option>xhigh</option>
-        <option>max</option>
       </select>
       <select id="permissions" aria-label="Permissions">
         <option value="">Default permissions</option>
@@ -68,8 +65,7 @@
   const permissions = document.querySelector("#permissions");
   let state = JSON.parse(localStorage.getItem("relay") || '{"threadId":null,"messages":[]}');
   token.value = localStorage.getItem("token") || "";
-  model.value = localStorage.getItem("model") || "";
-  reasoning.value = localStorage.getItem("reasoning") || "";
+  let info;
   permissions.value = localStorage.getItem("permissions") || "";
 
   function save() { localStorage.setItem("relay", JSON.stringify(state)); }
@@ -89,13 +85,42 @@
     draw();
   };
 
-  document.querySelector("#show-status").onclick = () => {
+  async function loadInfo() {
+    const response = await fetch("/info", { headers: { "Authorization": `Bearer ${token.value}` } });
+    if (!response.ok) throw new Error((await response.json()).error);
+    info = await response.json();
+    const saved = localStorage.getItem("model");
+    const selected = info.models.some(({ id }) => id === saved)
+      ? saved
+      : info.models.find(({ isDefault }) => isDefault)?.id;
+    model.replaceChildren(...info.models.map((item) => new Option(item.name, item.id)));
+    model.value = selected;
+    updateReasoning();
+  }
+
+  function updateReasoning() {
+    const selected = info.models.find(({ id }) => id === model.value);
+    const saved = localStorage.getItem("reasoning") || selected.defaultReasoning;
+    reasoning.replaceChildren(...selected.reasoning.map((effort) => new Option(effort, effort)));
+    reasoning.value = selected.reasoning.includes(saved) ? saved : selected.defaultReasoning;
+  }
+
+  model.onchange = updateReasoning;
+  token.onchange = () => loadInfo().catch((error) => { status.textContent = error.message; });
+
+  document.querySelector("#show-status").onclick = async () => {
+    status.textContent = "Loading status…";
+    try { await loadInfo(); } catch (error) { status.textContent = error.message; return; }
+    const limits = info.rateLimits;
     status.textContent = [
       `Thread: ${state.threadId || "new"}`,
-      `Model: ${model.value || "default"}`,
-      `Reasoning: ${reasoning.value || "default"}`,
+      `Model: ${model.value}`,
+      `Reasoning: ${reasoning.value}`,
       `Permissions: ${permissions.value || "default"}`,
-    ].join(" · ");
+      limits.primary && `5h: ${limits.primary.usedPercent}% used`,
+      limits.secondary && `Weekly: ${limits.secondary.usedPercent}% used`,
+      `Plan: ${limits.planType}`,
+    ].filter(Boolean).join(" · ");
   };
 
   form.onsubmit = async (event) => {
@@ -103,7 +128,7 @@
     const text = prompt.value.trim();
     if (!text) return;
     localStorage.setItem("token", token.value);
-    localStorage.setItem("model", model.value.trim());
+    localStorage.setItem("model", model.value);
     localStorage.setItem("reasoning", reasoning.value);
     localStorage.setItem("permissions", permissions.value);
     state.messages.push({ role: "user", text }, { role: "assistant", text: "" });
@@ -119,7 +144,7 @@
         body: JSON.stringify({
           prompt: text,
           threadId: state.threadId,
-          model: model.value.trim() || undefined,
+          model: model.value || undefined,
           reasoning: reasoning.value || undefined,
           permissions: permissions.value || undefined,
         }),
@@ -158,5 +183,6 @@
   };
 
   draw();
+  if (token.value) loadInfo().catch((error) => { status.textContent = error.message; });
 </script>
 </html>
