@@ -1,173 +1,74 @@
 const express = require("express");
 const { spawn } = require("node:child_process");
-const { timingSafeEqual } = require("node:crypto");
 
 const app = express();
-const port = process.env.PORT || 3000;
-const connectionTimeoutMs = Number(process.env.CONNECTION_TIMEOUT_MS || 30_000);
-const codexTimeoutMs = Number(process.env.CODEX_TIMEOUT_MS || 30 * 60_000);
 
-app.disable("x-powered-by");
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json());
+app.use(express.static("public"));
 
-function settings() {
-  return {
-    codespace: process.env.CODESPACE,
-    apiToken: process.env.API_TOKEN,
-    workdir: process.env.CODESPACE_WORKDIR,
-  };
+function authorize(req, res, next) {
+  if (!process.env.API_TOKEN || req.get("authorization") !== `Bearer ${process.env.API_TOKEN}`) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  next();
 }
 
-function missingConfiguration(res, values, names) {
-  const missing = names.filter((name) => !values[name]);
-  if (missing.length === 0) return false;
-  res.status(503).json({ error: `Missing environment variable(s): ${missing.join(", ")}` });
-  return true;
-}
-
-function authorized(req, expectedToken) {
-  const prefix = "Bearer ";
-  const header = req.get("authorization") || "";
-  if (!header.startsWith(prefix) || !expectedToken) return false;
-  const supplied = Buffer.from(header.slice(prefix.length));
-  const expected = Buffer.from(expectedToken);
-  return supplied.length === expected.length && timingSafeEqual(supplied, expected);
-}
-
-function startRemoteCommand(codespace, command, { debug = false } = {}) {
-  return spawn("gh", [
-    "codespace", "ssh", "-c", codespace,
-    "--",
-    "-o", "BatchMode=yes",
-    "-o", "ConnectTimeout=20",
-    "-o", "ServerAliveInterval=10",
-    "-o", "ServerAliveCountMax=2",
-    command,
-  ], {
+function run(command) {
+  return spawn("gh", ["codespace", "ssh", "-c", process.env.CODESPACE, "--", command], {
+    env: { ...process.env, GH_PROMPT_DISABLED: "1" },
     stdio: ["pipe", "pipe", "pipe"],
-    env: {
-      ...process.env,
-      GH_PROMPT_DISABLED: "1",
-      ...(debug ? { GH_DEBUG: "api" } : {}),
-    },
   });
 }
 
-app.get("/health", (_req, res) => {
-  const config = settings();
-  res.status(config.codespace && config.apiToken ? 200 : 503).json({
-    ok: Boolean(config.codespace && config.apiToken),
-    codespaceConfigured: Boolean(config.codespace),
-    apiTokenConfigured: Boolean(config.apiToken),
-  });
-});
-
-app.get("/test", (_req, res) => {
-  const config = settings();
-  if (missingConfiguration(res, config, ["codespace"])) return;
-
-  const child = startRemoteCommand(
-    config.codespace,
-    "printf 'codespace connected\\n'",
-    { debug: true },
-  );
+app.get("/test", authorize, (_req, res) => {
+  const child = run("hostname && pwd");
   let stdout = "";
   let stderr = "";
-  let settled = false;
-  const timer = setTimeout(() => {
-    if (settled) return;
-    settled = true;
-    child.kill("SIGTERM");
-    res.status(504).json({
-      error: "Timed out connecting to the codespace",
-      stderr: stderr || undefined,
-    });
-  }, connectionTimeoutMs);
 
   child.stdout.on("data", (chunk) => { stdout += chunk; });
   child.stderr.on("data", (chunk) => { stderr += chunk; });
-  child.on("error", (error) => {
-    if (settled) return;
-    settled = true;
-    clearTimeout(timer);
-    res.status(502).json({ error: error.message });
-  });
-  child.on("close", (code, signal) => {
-    if (settled) return;
-    settled = true;
-    clearTimeout(timer);
-    if (code !== 0) {
-      return res.status(502).json({ error: "SSH command failed", code, signal, stderr });
-    }
+  child.on("error", (error) => res.status(502).json({ error: error.message }));
+  child.on("close", (code) => {
+    if (res.headersSent) return;
+    if (code !== 0) return res.status(502).json({ error: stderr || `gh exited with ${code}` });
     res.type("text/plain").send(stdout);
   });
   child.stdin.end();
 });
 
-app.post("/codex", (req, res) => {
-  const config = settings();
-  if (missingConfiguration(res, config, ["codespace", "apiToken"])) return;
-  if (!authorized(req, config.apiToken)) return res.status(401).json({ error: "Unauthorized" });
-
-  const prompt = req.body?.prompt;
-  if (typeof prompt !== "string" || prompt.trim().length === 0) {
-    return res.status(400).json({ error: "Body must contain a non-empty string field named prompt" });
+app.post("/turn", authorize, (req, res) => {
+  const { prompt, threadId } = req.body;
+  if (typeof prompt !== "string" || !prompt.trim()) {
+    return res.status(400).json({ error: "prompt is required" });
   }
-  if (config.workdir && !/^\/[A-Za-z0-9._/-]+$/.test(config.workdir)) {
-    return res.status(503).json({ error: "CODESPACE_WORKDIR must be an absolute path" });
+  if (threadId && !/^[0-9a-f-]+$/i.test(threadId)) {
+    return res.status(400).json({ error: "threadId is invalid" });
   }
 
-  const codexArgs = ["codex", "exec", "--json"];
-  if (config.workdir) codexArgs.push("--cd", config.workdir);
-  codexArgs.push("-");
-  const child = startRemoteCommand(config.codespace, codexArgs.join(" "));
-  let finished = false;
-  let stderr = "";
+  const workdir = process.env.CODESPACE_WORKDIR || "/workspaces/remote-codex-codespace";
+  const action = threadId
+    ? `codex exec resume --json ${threadId} -`
+    : "codex exec --json -";
+  const child = run(`cd ${workdir} && ${action}`);
 
-  res.status(200);
-  res.set({
-    "Content-Type": "application/x-ndjson; charset=utf-8",
-    "Cache-Control": "no-cache, no-transform",
-    "X-Accel-Buffering": "no",
-  });
+  res.type("application/x-ndjson");
+  res.set("Cache-Control", "no-cache, no-transform");
+  res.set("X-Accel-Buffering", "no");
   res.flushHeaders();
-  res.write(`${JSON.stringify({ type: "connection.started" })}\n`);
 
-  const timer = setTimeout(() => {
-    if (finished) return;
-    child.kill("SIGTERM");
-    res.write(`${JSON.stringify({ type: "error", message: "Codex command timed out" })}\n`);
-  }, codexTimeoutMs);
-
-  req.on("aborted", () => child.kill("SIGTERM"));
-  res.on("close", () => {
-    if (!finished) child.kill("SIGTERM");
-  });
   child.stdout.pipe(res, { end: false });
-  child.stderr.on("data", (chunk) => {
-    stderr = (stderr + chunk.toString()).slice(-16_384);
+  child.stderr.pipe(process.stderr);
+  child.on("error", (error) => res.end(`${JSON.stringify({ type: "error", message: error.message })}\n`));
+  child.on("close", (code) => {
+    if (code !== 0) res.write(`${JSON.stringify({ type: "error", message: `Codex exited with ${code}` })}\n`);
+    res.end();
   });
-  child.on("error", (error) => {
-    if (finished) return;
-    finished = true;
-    clearTimeout(timer);
-    res.end(`${JSON.stringify({ type: "error", message: error.message })}\n`);
-  });
-  child.on("close", (code, signal) => {
-    if (finished) return;
-    finished = true;
-    clearTimeout(timer);
-    res.end(`${JSON.stringify({ type: "connection.closed", code, signal, stderr: stderr || undefined })}\n`);
-  });
+  res.on("close", () => child.kill());
   child.stdin.end(prompt);
 });
 
-app.use((error, _req, res, _next) => {
-  if (error?.type === "entity.parse.failed") {
-    return res.status(400).json({ error: "Request body must be valid JSON" });
-  }
-  console.error(error);
-  res.status(500).json({ error: "Internal server error" });
-});
+if (require.main === module) {
+  app.listen(process.env.PORT || 3000, "0.0.0.0");
+}
 
-app.listen(port, "0.0.0.0", () => console.log(`Listening on ${port}`));
+module.exports = app;
