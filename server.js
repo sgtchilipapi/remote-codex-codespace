@@ -37,18 +37,32 @@ app.get("/test", authorize, (_req, res) => {
 });
 
 app.post("/turn", authorize, (req, res) => {
-  const { prompt, threadId } = req.body;
+  const { prompt, threadId, model, reasoning, permissions } = req.body;
   if (typeof prompt !== "string" || !prompt.trim()) {
     return res.status(400).json({ error: "prompt is required" });
   }
   if (threadId && !/^[0-9a-f-]+$/i.test(threadId)) {
     return res.status(400).json({ error: "threadId is invalid" });
   }
+  if (model && !/^[A-Za-z0-9._-]+$/.test(model)) {
+    return res.status(400).json({ error: "model is invalid" });
+  }
+  if (reasoning && !["low", "medium", "high", "xhigh", "max"].includes(reasoning)) {
+    return res.status(400).json({ error: "reasoning is invalid" });
+  }
+  if (permissions && !["read-only", "workspace-write"].includes(permissions)) {
+    return res.status(400).json({ error: "permissions is invalid" });
+  }
 
   const workdir = process.env.CODESPACE_WORKDIR || "/workspaces/remote-codex-codespace";
+  const options = [
+    model && `--model ${model}`,
+    reasoning && `-c model_reasoning_effort=\"${reasoning}\"`,
+    permissions && `-c sandbox_mode=\"${permissions}\"`,
+  ].filter(Boolean).join(" ");
   const action = threadId
-    ? `codex exec resume --json ${threadId} -`
-    : "codex exec --json -";
+    ? `codex exec resume --json ${options} ${threadId} -`
+    : `codex exec --json ${options} -`;
   const child = run(`cd ${workdir} && ${action}`);
 
   res.type("application/x-ndjson");

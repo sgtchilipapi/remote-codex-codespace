@@ -9,7 +9,7 @@ A minimal mobile web UI for controlling Codex in one existing GitHub Codespace t
 - `API_TOKEN`: secret entered in the mobile UI
 - `CODESPACE_WORKDIR`: repository path inside the Codespace (optional; defaults to `/workspaces/remote-codex-codespace`)
 
-Deploy the repository to Railway, open its public URL on your phone, enter `API_TOKEN`, and send a prompt. The browser retains the active Codex thread and displayed messages in local storage. **New** clears both and starts another thread.
+Deploy the repository to Railway, open its public URL on your phone, enter `API_TOKEN`, and send a prompt. The browser retains the active Codex thread, displayed messages, model, reasoning effort, and permissions in local storage. **New** starts another thread; **Status** shows the current selections and Thread ID.
 
 To verify SSH independently:
 

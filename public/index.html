@@ -10,8 +10,9 @@
   * { box-sizing: border-box; }
   body { margin: 0; background: #111827; color: #e5e7eb; font: 16px system-ui; }
   main { max-width: 720px; min-height: 100dvh; margin: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
-  header, form { display: flex; gap: 8px; }
-  header { align-items: center; }
+  header, form, nav { display: flex; gap: 8px; }
+  header { align-items: center; flex-wrap: wrap; }
+  nav { width: 100%; }
   h1 { margin: 0; font-size: 18px; flex: 1; }
   #messages { flex: 1; overflow-wrap: anywhere; white-space: pre-wrap; }
   .message { padding: 12px; margin: 8px 0; border-radius: 10px; background: #1f2937; }
@@ -19,6 +20,7 @@
   input, textarea, button { font: inherit; border: 0; border-radius: 8px; padding: 10px; }
   input, textarea { color: #111827; background: white; }
   #token { width: 150px; }
+  #model { min-width: 0; flex: 1; }
   textarea { flex: 1; resize: none; }
   button { background: #e5e7eb; color: #111827; }
   button:disabled { opacity: .5; }
@@ -28,7 +30,24 @@
   <header>
     <h1>Codex Relay</h1>
     <input id="token" type="password" placeholder="API token" aria-label="API token">
-    <button id="new" type="button">New</button>
+    <nav>
+      <button id="new" type="button">New</button>
+      <button id="show-status" type="button">Status</button>
+      <input id="model" placeholder="Default model" aria-label="Model">
+      <select id="reasoning" aria-label="Reasoning">
+        <option value="">Default reasoning</option>
+        <option>low</option>
+        <option>medium</option>
+        <option>high</option>
+        <option>xhigh</option>
+        <option>max</option>
+      </select>
+      <select id="permissions" aria-label="Permissions">
+        <option value="">Default permissions</option>
+        <option value="read-only">read only</option>
+        <option value="workspace-write">workspace write</option>
+      </select>
+    </nav>
   </header>
   <div id="messages"></div>
   <div id="status"></div>
@@ -44,8 +63,14 @@
   const form = document.querySelector("form");
   const prompt = document.querySelector("#prompt");
   const send = document.querySelector("#send");
+  const model = document.querySelector("#model");
+  const reasoning = document.querySelector("#reasoning");
+  const permissions = document.querySelector("#permissions");
   let state = JSON.parse(localStorage.getItem("relay") || '{"threadId":null,"messages":[]}');
   token.value = localStorage.getItem("token") || "";
+  model.value = localStorage.getItem("model") || "";
+  reasoning.value = localStorage.getItem("reasoning") || "";
+  permissions.value = localStorage.getItem("permissions") || "";
 
   function save() { localStorage.setItem("relay", JSON.stringify(state)); }
   function draw() {
@@ -64,11 +89,23 @@
     draw();
   };
 
+  document.querySelector("#show-status").onclick = () => {
+    status.textContent = [
+      `Thread: ${state.threadId || "new"}`,
+      `Model: ${model.value || "default"}`,
+      `Reasoning: ${reasoning.value || "default"}`,
+      `Permissions: ${permissions.value || "default"}`,
+    ].join(" · ");
+  };
+
   form.onsubmit = async (event) => {
     event.preventDefault();
     const text = prompt.value.trim();
     if (!text) return;
     localStorage.setItem("token", token.value);
+    localStorage.setItem("model", model.value.trim());
+    localStorage.setItem("reasoning", reasoning.value);
+    localStorage.setItem("permissions", permissions.value);
     state.messages.push({ role: "user", text }, { role: "assistant", text: "" });
     prompt.value = "";
     send.disabled = true;
@@ -79,7 +116,13 @@
       const response = await fetch("/turn", {
         method: "POST",
         headers: { "Authorization": `Bearer ${token.value}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: text, threadId: state.threadId }),
+        body: JSON.stringify({
+          prompt: text,
+          threadId: state.threadId,
+          model: model.value.trim() || undefined,
+          reasoning: reasoning.value || undefined,
+          permissions: permissions.value || undefined,
+        }),
       });
       if (!response.ok) throw new Error((await response.json()).error);
 
