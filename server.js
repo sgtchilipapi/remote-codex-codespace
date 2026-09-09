@@ -18,14 +18,10 @@ app.get("/test", (req, res) => {
     [
       "codespace",
       "ssh",
+      "--config",
       "-c",
-      codespace,
-      "--",
-      "-o",
-      "BatchMode=yes",
-      "-o",
-      "ConnectTimeout=15",
-      "hostname && pwd"
+      codespace
+    ]
     ],
     (error, stdout, stderr) => {
       if (error) {
