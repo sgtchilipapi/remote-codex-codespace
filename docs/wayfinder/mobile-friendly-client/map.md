@@ -23,11 +23,11 @@ An implementation-ready specification for a focused responsive cleanup of the Mo
 
 ## Decisions so far
 
-<!-- Empty until child tickets are resolved. -->
+- [Audit the Mobile Client at target viewport widths](tickets/01-audit-target-viewports.md): Baseline captures identify portrait navigation overflow, undersized controls, non-sticky and fixed-height composer behavior, unconditional bottom scrolling, missing safe-area handling, and undifferentiated message wrapping as the compact layout's concrete failure set.
+- [Choose the compact Mobile Client layout](tickets/02-choose-compact-layout.md): Use focus mode—Configuration replaces the compact content area while open, then disappears completely so the Thread and sticky composer retain the viewport, with **Configure** as its only entry point.
 
 ## Not yet specified
 
-- Exact spacing, typography, breakpoint, height caps, near-bottom threshold, and safe-area values will become specifiable after the compact layout prototype is validated.
 - Any browser-specific accommodations revealed by the baseline audit or prototype need to be classified and ticketed when known.
 - Any Relay API change needed to support the agreed Mobile Client behavior must be isolated and assessed if the prototype reveals one.
 
@@ -39,8 +39,6 @@ An implementation-ready specification for a focused responsive cleanup of the Mo
 
 ## Open child tickets
 
-1. [Audit the Mobile Client at target viewport widths](tickets/01-audit-target-viewports.md)
-2. [Choose the compact Mobile Client layout](tickets/02-choose-compact-layout.md)
-3. [Specify Configuration panel state and validation](tickets/03-specify-configuration-panel.md)
-4. [Specify Thread scrolling and composer behavior](tickets/04-specify-thread-and-composer.md)
-5. [Define the responsive acceptance contract](tickets/05-define-acceptance-contract.md)
+1. [Specify Configuration panel state and validation](tickets/03-specify-configuration-panel.md)
+2. [Specify Thread scrolling and composer behavior](tickets/04-specify-thread-and-composer.md)
+3. [Define the responsive acceptance contract](tickets/05-define-acceptance-contract.md)

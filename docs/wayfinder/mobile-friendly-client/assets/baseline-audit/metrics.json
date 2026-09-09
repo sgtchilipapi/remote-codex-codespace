@@ -1,0 +1,497 @@
+[
+  {
+    "name": "320",
+    "viewport": {
+      "width": 443,
+      "height": 787
+    },
+    "document": {
+      "clientWidth": 320,
+      "scrollWidth": 443,
+      "scrollHeight": 2089
+    },
+    "scroll": {
+      "x": 0,
+      "y": 1302
+    },
+    "header": {
+      "x": 16,
+      "y": -1286,
+      "width": 288,
+      "height": 86,
+      "right": 304,
+      "bottom": -1200
+    },
+    "nav": {
+      "x": 16,
+      "y": -1239,
+      "width": 288,
+      "height": 39,
+      "right": 304,
+      "bottom": -1200
+    },
+    "form": {
+      "x": 16,
+      "y": 694,
+      "width": 288,
+      "height": 77,
+      "right": 304,
+      "bottom": 771
+    },
+    "prompt": {
+      "x": 16,
+      "y": 694,
+      "width": 219.703125,
+      "height": 77,
+      "right": 235.703125,
+      "bottom": 771
+    },
+    "send": {
+      "x": 243.703125,
+      "y": 694,
+      "width": 60.296875,
+      "height": 77,
+      "right": 304,
+      "bottom": 771
+    },
+    "controlsUnder44px": [
+      {
+        "id": "token",
+        "width": 150,
+        "height": 39
+      },
+      {
+        "id": "new",
+        "width": 54.90625,
+        "height": 39
+      },
+      {
+        "id": "show-status",
+        "width": 70.984375,
+        "height": 39
+      },
+      {
+        "id": "model",
+        "width": 2,
+        "height": 39
+      },
+      {
+        "id": "reasoning",
+        "width": 127,
+        "height": 39
+      },
+      {
+        "id": "permissions",
+        "width": 140,
+        "height": 39
+      }
+    ],
+    "focus": {
+      "outlineStyle": "auto",
+      "outlineWidth": "1px",
+      "boxShadow": "none"
+    },
+    "messagesWhiteSpace": "pre-wrap",
+    "messagesOverflowWrap": "anywhere",
+    "formPosition": "static",
+    "mainPadding": "16px"
+  },
+  {
+    "name": "360",
+    "viewport": {
+      "width": 443,
+      "height": 985
+    },
+    "document": {
+      "clientWidth": 360,
+      "scrollWidth": 443,
+      "scrollHeight": 1690
+    },
+    "scroll": {
+      "x": 0,
+      "y": 705
+    },
+    "header": {
+      "x": 16,
+      "y": -689,
+      "width": 328,
+      "height": 86,
+      "right": 344,
+      "bottom": -603
+    },
+    "nav": {
+      "x": 16,
+      "y": -642,
+      "width": 328,
+      "height": 39,
+      "right": 344,
+      "bottom": -603
+    },
+    "form": {
+      "x": 16,
+      "y": 892,
+      "width": 328,
+      "height": 77,
+      "right": 344,
+      "bottom": 969
+    },
+    "prompt": {
+      "x": 16,
+      "y": 892,
+      "width": 259.703125,
+      "height": 77,
+      "right": 275.703125,
+      "bottom": 969
+    },
+    "send": {
+      "x": 283.703125,
+      "y": 892,
+      "width": 60.296875,
+      "height": 77,
+      "right": 344,
+      "bottom": 969
+    },
+    "controlsUnder44px": [
+      {
+        "id": "token",
+        "width": 150,
+        "height": 39
+      },
+      {
+        "id": "new",
+        "width": 54.90625,
+        "height": 39
+      },
+      {
+        "id": "show-status",
+        "width": 70.984375,
+        "height": 39
+      },
+      {
+        "id": "model",
+        "width": 2,
+        "height": 39
+      },
+      {
+        "id": "reasoning",
+        "width": 127,
+        "height": 39
+      },
+      {
+        "id": "permissions",
+        "width": 140,
+        "height": 39
+      }
+    ],
+    "focus": {
+      "outlineStyle": "auto",
+      "outlineWidth": "1px",
+      "boxShadow": "none"
+    },
+    "messagesWhiteSpace": "pre-wrap",
+    "messagesOverflowWrap": "anywhere",
+    "formPosition": "static",
+    "mainPadding": "16px"
+  },
+  {
+    "name": "390",
+    "viewport": {
+      "width": 443,
+      "height": 959
+    },
+    "document": {
+      "clientWidth": 390,
+      "scrollWidth": 443,
+      "scrollHeight": 1671
+    },
+    "scroll": {
+      "x": 0,
+      "y": 712
+    },
+    "header": {
+      "x": 16,
+      "y": -696,
+      "width": 358,
+      "height": 86,
+      "right": 374,
+      "bottom": -610
+    },
+    "nav": {
+      "x": 16,
+      "y": -649,
+      "width": 358,
+      "height": 39,
+      "right": 374,
+      "bottom": -610
+    },
+    "form": {
+      "x": 16,
+      "y": 866,
+      "width": 358,
+      "height": 77,
+      "right": 374,
+      "bottom": 943
+    },
+    "prompt": {
+      "x": 16,
+      "y": 866,
+      "width": 289.703125,
+      "height": 77,
+      "right": 305.703125,
+      "bottom": 943
+    },
+    "send": {
+      "x": 313.703125,
+      "y": 866,
+      "width": 60.296875,
+      "height": 77,
+      "right": 374,
+      "bottom": 943
+    },
+    "controlsUnder44px": [
+      {
+        "id": "token",
+        "width": 150,
+        "height": 39
+      },
+      {
+        "id": "new",
+        "width": 54.90625,
+        "height": 39
+      },
+      {
+        "id": "show-status",
+        "width": 70.984375,
+        "height": 39
+      },
+      {
+        "id": "model",
+        "width": 2,
+        "height": 39
+      },
+      {
+        "id": "reasoning",
+        "width": 127,
+        "height": 39
+      },
+      {
+        "id": "permissions",
+        "width": 140,
+        "height": 39
+      }
+    ],
+    "focus": {
+      "outlineStyle": "auto",
+      "outlineWidth": "1px",
+      "boxShadow": "none"
+    },
+    "messagesWhiteSpace": "pre-wrap",
+    "messagesOverflowWrap": "anywhere",
+    "formPosition": "static",
+    "mainPadding": "16px"
+  },
+  {
+    "name": "430",
+    "viewport": {
+      "width": 443,
+      "height": 961
+    },
+    "document": {
+      "clientWidth": 430,
+      "scrollWidth": 443,
+      "scrollHeight": 1671
+    },
+    "scroll": {
+      "x": 0,
+      "y": 710
+    },
+    "header": {
+      "x": 16,
+      "y": -694,
+      "width": 398,
+      "height": 86,
+      "right": 414,
+      "bottom": -608
+    },
+    "nav": {
+      "x": 16,
+      "y": -647,
+      "width": 398,
+      "height": 39,
+      "right": 414,
+      "bottom": -608
+    },
+    "form": {
+      "x": 16,
+      "y": 868,
+      "width": 398,
+      "height": 77,
+      "right": 414,
+      "bottom": 945
+    },
+    "prompt": {
+      "x": 16,
+      "y": 868,
+      "width": 329.703125,
+      "height": 77,
+      "right": 345.703125,
+      "bottom": 945
+    },
+    "send": {
+      "x": 353.703125,
+      "y": 868,
+      "width": 60.296875,
+      "height": 77,
+      "right": 414,
+      "bottom": 945
+    },
+    "controlsUnder44px": [
+      {
+        "id": "token",
+        "width": 150,
+        "height": 39
+      },
+      {
+        "id": "new",
+        "width": 54.90625,
+        "height": 39
+      },
+      {
+        "id": "show-status",
+        "width": 70.984375,
+        "height": 39
+      },
+      {
+        "id": "model",
+        "width": 2,
+        "height": 39
+      },
+      {
+        "id": "reasoning",
+        "width": 127,
+        "height": 39
+      },
+      {
+        "id": "permissions",
+        "width": 140,
+        "height": 39
+      }
+    ],
+    "focus": {
+      "outlineStyle": "auto",
+      "outlineWidth": "1px",
+      "boxShadow": "none"
+    },
+    "messagesWhiteSpace": "pre-wrap",
+    "messagesOverflowWrap": "anywhere",
+    "formPosition": "static",
+    "mainPadding": "16px"
+  },
+  {
+    "name": "landscape-844x390",
+    "viewport": {
+      "width": 844,
+      "height": 390
+    },
+    "document": {
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "scrollHeight": 1196
+    },
+    "scroll": {
+      "x": 0,
+      "y": 806
+    },
+    "header": {
+      "x": 78,
+      "y": -790,
+      "width": 688,
+      "height": 86,
+      "right": 766,
+      "bottom": -704
+    },
+    "nav": {
+      "x": 78,
+      "y": -743,
+      "width": 688,
+      "height": 39,
+      "right": 766,
+      "bottom": -704
+    },
+    "form": {
+      "x": 78,
+      "y": 297,
+      "width": 688,
+      "height": 77,
+      "right": 766,
+      "bottom": 374
+    },
+    "prompt": {
+      "x": 78,
+      "y": 297,
+      "width": 619.703125,
+      "height": 77,
+      "right": 697.703125,
+      "bottom": 374
+    },
+    "send": {
+      "x": 705.703125,
+      "y": 297,
+      "width": 60.296875,
+      "height": 77,
+      "right": 766,
+      "bottom": 374
+    },
+    "controlsUnder44px": [
+      {
+        "id": "token",
+        "width": 150,
+        "height": 39
+      },
+      {
+        "id": "new",
+        "width": 54.90625,
+        "height": 39
+      },
+      {
+        "id": "show-status",
+        "width": 70.984375,
+        "height": 39
+      },
+      {
+        "id": "model",
+        "width": 263.109375,
+        "height": 39
+      },
+      {
+        "id": "reasoning",
+        "width": 127,
+        "height": 39
+      },
+      {
+        "id": "permissions",
+        "width": 140,
+        "height": 39
+      }
+    ],
+    "focus": {
+      "outlineStyle": "auto",
+      "outlineWidth": "1px",
+      "boxShadow": "none"
+    },
+    "messagesWhiteSpace": "pre-wrap",
+    "messagesOverflowWrap": "anywhere",
+    "formPosition": "static",
+    "mainPadding": "16px"
+  },
+  {
+    "name": "keyboard-simulation-390x420",
+    "viewportHeight": 478,
+    "scrollY": 0,
+    "form": {
+      "top": 327,
+      "bottom": 404
+    },
+    "visibleWithoutScroll": true
+  }
+]
