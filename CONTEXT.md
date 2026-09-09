@@ -27,3 +27,11 @@ _Avoid_: Session, conversation
 **Configuration panel**:
 The collapsible area of the Mobile Client where the user stages the API token, model, reasoning effort, and permissions for subsequent Turns.
 _Avoid_: Settings page, navigation drawer
+
+**Applied configuration**:
+The Mobile Client configuration most recently authenticated and committed for subsequent Turns.
+_Avoid_: Saved settings, active settings
+
+**Configuration draft**:
+The editable copy of the applied configuration held while the Configuration panel is open.
+_Avoid_: Temporary settings, pending settings
