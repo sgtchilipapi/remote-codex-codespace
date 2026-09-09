@@ -22,14 +22,13 @@ app.get("/test", (req, res) => {
       codespace,
       "hostname && pwd",
     ],
-    {
-      timeout: 60_000,
-    },
     (error, stdout, stderr) => {
       if (error) {
         return res.status(500).json({
           error: error.message,
           code: error.code,
+          killed: error.killed,
+          signal: error.signal,
           stdout,
           stderr,
         });
