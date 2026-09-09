@@ -21,7 +21,6 @@ app.get("/test", (req, res) => {
       "--config",
       "-c",
       codespace
-    ]
     ],
     (error, stdout, stderr) => {
       if (error) {
