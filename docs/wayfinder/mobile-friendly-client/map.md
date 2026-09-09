@@ -27,11 +27,11 @@ An implementation-ready specification for a focused responsive cleanup of the Mo
 - [Choose the compact Mobile Client layout](tickets/02-choose-compact-layout.md): Use focus mode—Configuration replaces the compact content area while open, then disappears completely so the Thread and sticky composer retain the viewport, with **Configure** as its only entry point.
 - [Specify Configuration panel state and validation](tickets/03-specify-configuration-panel.md): Treat Configuration as an authenticated, transactional draft over the last applied values, with explicit defaults, atomic Apply, discard-on-Cancel, startup revalidation, actionable failures, and active-Turn locking.
 - [Specify Thread scrolling and composer behavior](tickets/04-specify-thread-and-composer.md): Make the visual-viewport app shell and Thread own scrolling, cap the auto-growing composer, follow streaming only within an 80px bottom zone, preserve reader position and focus, and isolate fenced code overflow inside messages.
+- [Define the responsive acceptance contract](tickets/05-define-acceptance-contract.md): Gate implementation with a compact Playwright Chromium behavior/geometry suite, focused real-device Safari and Chrome smoke passes, and explicit mobile and desktop regression boundaries.
 
 ## Not yet specified
 
-- Any browser-specific accommodations revealed by the baseline audit or prototype need to be classified and ticketed when known.
-- Any Relay API change needed to support the agreed Mobile Client behavior must be isolated and assessed if the prototype reveals one.
+None. A reproducible browser-specific failure discovered during implementation verification should be tracked as new work; no workaround or Relay API change is currently justified.
 
 ## Out of scope
 
@@ -41,4 +41,4 @@ An implementation-ready specification for a focused responsive cleanup of the Mo
 
 ## Open child tickets
 
-1. [Define the responsive acceptance contract](tickets/05-define-acceptance-contract.md)
+None.
