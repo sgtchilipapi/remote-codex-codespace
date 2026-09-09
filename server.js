@@ -18,11 +18,13 @@ app.get("/test", (req, res) => {
     [
       "codespace",
       "ssh",
-      "-d",
-      "--debug-file",
-      "/tmp/ssh-debug.log",
       "-c",
       codespace,
+      "--",
+      "-o",
+      "BatchMode=yes",
+      "-o",
+      "ConnectTimeout=15",
       "hostname && pwd"
     ],
     (error, stdout, stderr) => {
