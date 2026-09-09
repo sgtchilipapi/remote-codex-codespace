@@ -20,10 +20,6 @@ _Avoid_: Worker, VPS
 One prompt sent to Codex and the resulting streamed output.
 _Avoid_: Command, job, request
 
-**Active Turn**:
-A Turn accepted by the Relay whose Codex work has not yet completed or failed. Its lifetime is owned by the Relay and does not depend on a Mobile Client connection.
-_Avoid_: Open request, active fetch
-
 **Thread**:
 A sequence of related Turns whose context is retained by Codex.
 _Avoid_: Session, conversation
