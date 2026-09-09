@@ -2,9 +2,10 @@
   "name": "remote-codex-codespace",
   "version": "1.0.0",
   "description": "A lightweight server to serve as a jump board to connect to github codespaces.",
-  "main": "index.js",
+  "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js",
+    "test": "node --test"
   },
   "repository": {
     "type": "git",
