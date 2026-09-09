@@ -34,10 +34,22 @@ function authorized(req, expectedToken) {
   return supplied.length === expected.length && timingSafeEqual(supplied, expected);
 }
 
-function startRemoteCommand(codespace, command) {
-  return spawn("gh", ["codespace", "ssh", "-c", codespace, "--", command], {
+function startRemoteCommand(codespace, command, { debug = false } = {}) {
+  return spawn("gh", [
+    "codespace", "ssh", "-c", codespace,
+    "--",
+    "-o", "BatchMode=yes",
+    "-o", "ConnectTimeout=20",
+    "-o", "ServerAliveInterval=10",
+    "-o", "ServerAliveCountMax=2",
+    command,
+  ], {
     stdio: ["pipe", "pipe", "pipe"],
-    env: { ...process.env, GH_PROMPT_DISABLED: "1" },
+    env: {
+      ...process.env,
+      GH_PROMPT_DISABLED: "1",
+      ...(debug ? { GH_DEBUG: "api" } : {}),
+    },
   });
 }
 
@@ -54,7 +66,11 @@ app.get("/test", (_req, res) => {
   const config = settings();
   if (missingConfiguration(res, config, ["codespace"])) return;
 
-  const child = startRemoteCommand(config.codespace, "printf 'codespace connected\\n'");
+  const child = startRemoteCommand(
+    config.codespace,
+    "printf 'codespace connected\\n'",
+    { debug: true },
+  );
   let stdout = "";
   let stderr = "";
   let settled = false;
