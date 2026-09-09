@@ -29,6 +29,8 @@ app.get("/test", (req, res) => {
       if (error) {
         return res.status(500).json({
           error: error.message,
+          code: error.code,
+          stdout,
           stderr,
         });
       }
