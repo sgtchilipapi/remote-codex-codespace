@@ -11,6 +11,8 @@ A minimal mobile web UI for controlling Codex in one existing GitHub Codespace t
 
 Deploy the repository to Railway, open its public URL on your phone, enter `API_TOKEN`, and send a prompt. The model and its supported reasoning levels come from Codex inside the Codespace. The browser retains the active Codex thread, displayed messages, model, reasoning effort, and permissions in local storage. **New** starts another thread; **Status** shows the current selections, Thread ID, plan, and live usage limits.
 
+An accepted Turn belongs to the Relay rather than to one streaming HTTP connection. If the browser is backgrounded or changes networks, the Mobile Client reconnects with the persisted Turn ID and replays only the output it missed. Active Turns and their buffered output remain process-local, so a Railway restart still ends recovery.
+
 To verify SSH independently:
 
 ```sh

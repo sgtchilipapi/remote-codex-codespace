@@ -60,12 +60,15 @@
   const form = document.querySelector("form");
   const prompt = document.querySelector("#prompt");
   const send = document.querySelector("#send");
+  const newButton = document.querySelector("#new");
   const model = document.querySelector("#model");
   const reasoning = document.querySelector("#reasoning");
   const permissions = document.querySelector("#permissions");
-  let state = JSON.parse(localStorage.getItem("relay") || '{"threadId":null,"messages":[]}');
+  let state = JSON.parse(localStorage.getItem("relay") || '{"threadId":null,"messages":[],"activeTurn":null}');
+  state.activeTurn ||= null;
   token.value = localStorage.getItem("token") || "";
   let info;
+  let followingTurn = false;
   permissions.value = localStorage.getItem("permissions") || "";
 
   function save() { localStorage.setItem("relay", JSON.stringify(state)); }
@@ -76,11 +79,15 @@
       node.textContent = text;
       return node;
     }));
+    const working = Boolean(state.activeTurn);
+    send.disabled = working;
+    newButton.disabled = working;
     window.scrollTo(0, document.body.scrollHeight);
   }
 
-  document.querySelector("#new").onclick = () => {
-    state = { threadId: null, messages: [] };
+  newButton.onclick = () => {
+    if (state.activeTurn) return;
+    state = { threadId: null, messages: [], activeTurn: null };
     save();
     draw();
   };
@@ -112,7 +119,9 @@
   };
   reasoning.onchange = () => localStorage.setItem("reasoning", reasoning.value);
   permissions.onchange = () => localStorage.setItem("permissions", permissions.value);
-  token.onchange = () => loadInfo().catch((error) => { status.textContent = error.message; });
+  token.onchange = () => loadInfo()
+    .then(() => followActiveTurn())
+    .catch((error) => { status.textContent = error.message; });
 
   document.querySelector("#show-status").onclick = async () => {
     status.textContent = "Loading status…";
@@ -129,66 +138,142 @@
     ].filter(Boolean).join(" · ");
   };
 
+  const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+  function stopUnavailableTurn(message) {
+    const active = state.activeTurn;
+    const assistant = state.messages[active.messageIndex];
+    if (!assistant.text && active.error) assistant.text = `Error: ${active.error}`;
+    state.activeTurn = null;
+    status.textContent = message;
+    save();
+    draw();
+  }
+
+  function applyTurnEvent(event) {
+    const active = state.activeTurn;
+    if (!active || !Number.isInteger(event.sequence) || event.sequence <= active.lastSequence) return false;
+    active.lastSequence = event.sequence;
+    if (event.type === "thread.started") state.threadId = event.thread_id;
+    if (event.type === "item.completed" && event.item?.type === "agent_message") {
+      state.messages[active.messageIndex].text += event.item.text;
+    }
+    if (event.type === "error") active.error = event.message;
+    if (event.type !== "relay.turn.finished") return false;
+
+    if (event.status === "failed") {
+      stopUnavailableTurn(active.error ? `Codex failed: ${active.error}` : "Codex failed");
+    } else {
+      state.activeTurn = null;
+      status.textContent = "";
+      save();
+      draw();
+    }
+    return true;
+  }
+
+  async function responseError(response) {
+    let message = `${response.status} ${response.statusText}`.trim();
+    try { message = (await response.json()).error || message; } catch {}
+    const error = new Error(message);
+    error.retryable = response.status >= 500;
+    return error;
+  }
+
+  async function followActiveTurn() {
+    if (followingTurn || !state.activeTurn || !token.value) return;
+    followingTurn = true;
+    let retryDelay = 500;
+    try {
+      while (state.activeTurn) {
+        try {
+          const active = state.activeTurn;
+          if (active.stage === "starting") {
+            const response = await fetch("/turn", {
+              method: "POST",
+              headers: { "Authorization": `Bearer ${token.value}`, "Content-Type": "application/json" },
+              body: JSON.stringify({ turnId: active.id, ...active.request }),
+            });
+            if (!response.ok) throw await responseError(response);
+            active.stage = "streaming";
+            save();
+          }
+
+          const response = await fetch(`/turn/${active.id}/events?after=${active.lastSequence}`, {
+            headers: { "Authorization": `Bearer ${token.value}` },
+          });
+          if (!response.ok) throw await responseError(response);
+
+          status.textContent = "Codex is working…";
+          retryDelay = 500;
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+          while (state.activeTurn) {
+            const { value, done } = await reader.read();
+            buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+            const lines = buffer.split("\n");
+            buffer = lines.pop();
+            for (const line of lines) {
+              if (!line) continue;
+              if (applyTurnEvent(JSON.parse(line))) return;
+            }
+            save();
+            draw();
+            if (done) throw new Error("Turn stream ended before completion");
+          }
+        } catch (error) {
+          if (error.retryable === false) {
+            stopUnavailableTurn(`Disconnected: ${error.message}`);
+            return;
+          }
+          status.textContent = "Connection lost. Reconnecting…";
+          save();
+          draw();
+          await wait(retryDelay);
+          retryDelay = Math.min(retryDelay * 2, 10000);
+        }
+      }
+    } finally {
+      followingTurn = false;
+    }
+  }
+
   form.onsubmit = async (event) => {
     event.preventDefault();
     const text = prompt.value.trim();
-    if (!text) return;
+    if (!text || state.activeTurn) return;
     localStorage.setItem("token", token.value);
     localStorage.setItem("model", model.value);
     localStorage.setItem("reasoning", reasoning.value);
     localStorage.setItem("permissions", permissions.value);
     state.messages.push({ role: "user", text }, { role: "assistant", text: "" });
+    state.activeTurn = {
+      id: crypto.randomUUID(),
+      stage: "starting",
+      lastSequence: 0,
+      messageIndex: state.messages.length - 1,
+      request: {
+        prompt: text,
+        threadId: state.threadId,
+        model: model.value || undefined,
+        reasoning: reasoning.value || undefined,
+        permissions: permissions.value || undefined,
+      },
+    };
     prompt.value = "";
-    send.disabled = true;
     status.textContent = "Codex is working…";
+    save();
     draw();
-
-    try {
-      const response = await fetch("/turn", {
-        method: "POST",
-        headers: { "Authorization": `Bearer ${token.value}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          prompt: text,
-          threadId: state.threadId,
-          model: model.value || undefined,
-          reasoning: reasoning.value || undefined,
-          permissions: permissions.value || undefined,
-        }),
-      });
-      if (!response.ok) throw new Error((await response.json()).error);
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      while (true) {
-        const { value, done } = await reader.read();
-        buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
-        const lines = buffer.split("\n");
-        buffer = lines.pop();
-        for (const line of lines) {
-          if (!line) continue;
-          const event = JSON.parse(line);
-          if (event.type === "thread.started") state.threadId = event.thread_id;
-          if (event.type === "item.completed" && event.item?.type === "agent_message") {
-            state.messages.at(-1).text += event.item.text;
-            draw();
-          }
-          if (event.type === "error") throw new Error(event.message);
-        }
-        if (done) break;
-      }
-      status.textContent = "";
-    } catch (error) {
-      state.messages.at(-1).text = `Error: ${error.message}`;
-      status.textContent = "Disconnected";
-      draw();
-    } finally {
-      send.disabled = false;
-      save();
-    }
+    await followActiveTurn();
   };
 
   draw();
-  if (token.value) loadInfo().catch((error) => { status.textContent = error.message; });
+  if (token.value) {
+    loadInfo().catch((error) => { status.textContent = error.message; });
+    followActiveTurn();
+  } else if (state.activeTurn) {
+    status.textContent = "Enter the API token to reconnect to the active Turn";
+  }
 </script>
 </html>
