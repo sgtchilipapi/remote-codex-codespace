@@ -62,7 +62,10 @@ app.get("/test", (_req, res) => {
     if (settled) return;
     settled = true;
     child.kill("SIGTERM");
-    res.status(504).json({ error: "Timed out connecting to the codespace" });
+    res.status(504).json({
+      error: "Timed out connecting to the codespace",
+      stderr: stderr || undefined,
+    });
   }, connectionTimeoutMs);
 
   child.stdout.on("data", (chunk) => { stdout += chunk; });
