@@ -47,13 +47,28 @@ async function openConfiguredClient(page) {
 async function installStreamingTurn(page) {
   await page.addInitScript(() => {
     const originalFetch = window.fetch.bind(window);
+    let sequence = 0;
     window.fetch = async (input, init) => {
-      if (new URL(input, location.href).pathname !== "/turn") return originalFetch(input, init);
-      window.__turnRequest = JSON.parse(init.body);
+      const url = new URL(input, location.href);
+      if (url.pathname === "/turn") {
+        window.__turnRequest = JSON.parse(init.body);
+        return Response.json({ turnId: window.__turnRequest.turnId, eventsUrl: `/turn/${window.__turnRequest.turnId}/events` }, { status: 202 });
+      }
+      if (!/\/turn\/[^/]+\/events$/.test(url.pathname)) return originalFetch(input, init);
       const stream = new ReadableStream({
         start(controller) {
-          window.__pushTurnEvent = (event) => controller.enqueue(new TextEncoder().encode(`${JSON.stringify(event)}\n`));
-          window.__finishTurn = () => controller.close();
+          window.__pushTurnEvent = (event) => {
+            controller.enqueue(new TextEncoder().encode(`${JSON.stringify({ ...event, sequence: ++sequence })}\n`));
+            if (event.type === "error") {
+              controller.enqueue(new TextEncoder().encode(`${JSON.stringify({ type: "relay.turn.finished", status: "failed", sequence: ++sequence })}\n`));
+              controller.close();
+            }
+          };
+          window.__finishTurn = () => {
+            controller.enqueue(new TextEncoder().encode(`${JSON.stringify({ type: "relay.turn.finished", status: "completed", sequence: ++sequence })}\n`));
+            controller.close();
+          };
+          window.__dropTurn = () => controller.error(new TypeError("Load failed"));
         },
       });
       return new Response(stream, { status: 200, headers: { "Content-Type": "application/x-ndjson" } });
@@ -382,10 +397,11 @@ test("an active Turn locks actions, keeps prompt focus, and uses Applied configu
   await expect(page.getByRole("button", { name: "Send" })).toBeDisabled();
   await expect(prompt).toBeEnabled();
   await expect(prompt).toBeFocused();
-  await expect.poll(() => page.evaluate(() => window.__turnRequest)).toEqual({
+  await expect.poll(() => page.evaluate(() => window.__turnRequest)).toEqual(expect.objectContaining({
     prompt: "Ship it",
     threadId: null,
-  });
+    turnId: expect.any(String),
+  }));
 
   await page.evaluate(() => {
     window.__pushTurnEvent({ type: "thread.started", thread_id: "abc-123" });
@@ -414,6 +430,31 @@ test("a failed Turn restores locked actions without stealing prompt focus", asyn
   await expect(page.getByRole("button", { name: "Configure" })).toBeEnabled();
   await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
   await expect(prompt).toBeFocused();
+});
+
+test("a dropped Turn subscription reconnects without replacing accumulated output", async ({ page }) => {
+  await installStreamingTurn(page);
+  await openConfiguredClient(page);
+  await page.getByLabel("Prompt").fill("Keep going");
+  await page.locator("#composer").evaluate((form) => form.requestSubmit());
+  await expect.poll(() => page.evaluate(() => Boolean(window.__pushTurnEvent))).toBe(true);
+
+  await page.evaluate(() => {
+    window.__pushTurnEvent({ type: "thread.started", thread_id: "abc-123" });
+    window.__pushTurnEvent({ type: "item.completed", item: { type: "agent_message", text: "Already here" } });
+  });
+  await expect(page.getByText("Already here", { exact: true })).toBeVisible();
+  await page.evaluate(() => window.__dropTurn());
+  await expect(page.getByRole("status")).toContainText("Reconnecting");
+  await page.waitForTimeout(600);
+  await page.evaluate(() => {
+    window.__pushTurnEvent({ type: "item.completed", item: { type: "agent_message", text: " and recovered" } });
+    window.__finishTurn();
+  });
+
+  await expect(page.getByText("Already here and recovered", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Error: Load failed/)).toHaveCount(0);
+  expect(await page.evaluate(() => JSON.parse(localStorage.relay).activeTurn)).toBeNull();
 });
 
 test("the composer grows to its viewport cap and New resets it", async ({ page }) => {

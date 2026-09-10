@@ -35,13 +35,14 @@ const send = document.querySelector("#send");
 
 const emptyConfiguration = { token: "", model: "", reasoning: "", permissions: "" };
 const allowedPermissions = ["", "read-only", "workspace-write"];
-let state = readJson("relay", { threadId: null, messages: [] });
+let state = readJson("relay", { threadId: null, messages: [], activeTurn: null });
+state.activeTurn ||= null;
 let appliedConfiguration = readAppliedConfiguration();
 let configurationDraft = { ...(appliedConfiguration || emptyConfiguration) };
 let info = null;
 let ready = false;
 let checking = false;
-let activeTurn = false;
+let activeTurn = Boolean(state.activeTurn);
 let hydrating = false;
 let resumeCursor = null;
 let retryThreadPage = false;
@@ -341,7 +342,8 @@ async function checkPersistedConfiguration() {
     }
     ready = true;
     setConfigurationOpen(false);
-    await revalidateCachedThread();
+    if (state.activeTurn) void followActiveTurn();
+    else await revalidateCachedThread();
   } catch (error) {
     ready = false;
     configurationDraft = { ...appliedConfiguration };
@@ -610,6 +612,19 @@ composer.addEventListener("submit", async (event) => {
   const keepFocus = document.activeElement === prompt;
   const turnConfiguration = { ...appliedConfiguration };
   state.messages.push({ role: "user", text }, { role: "assistant", text: "" });
+  state.activeTurn = {
+    id: crypto.randomUUID(),
+    stage: "starting",
+    lastSequence: 0,
+    messageIndex: state.messages.length - 1,
+    request: {
+      prompt: text,
+      threadId: state.threadId,
+      model: persistedThreadConfiguration ? undefined : turnConfiguration.model || undefined,
+      reasoning: persistedThreadConfiguration ? undefined : turnConfiguration.reasoning || undefined,
+      permissions: persistedThreadConfiguration ? undefined : turnConfiguration.permissions || undefined,
+    },
+  };
   followThread = true;
   prompt.value = "";
   resizePrompt();
@@ -617,58 +632,73 @@ composer.addEventListener("submit", async (event) => {
   setThreadControls();
   setStatus("Codex is working…");
   drawMessages({ forceFollow: true });
+  saveState();
   if (keepFocus) prompt.focus();
-
-  try {
-    const response = await fetch("/turn", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${turnConfiguration.token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        prompt: text,
-        threadId: state.threadId,
-        model: persistedThreadConfiguration ? undefined : turnConfiguration.model || undefined,
-        reasoning: persistedThreadConfiguration ? undefined : turnConfiguration.reasoning || undefined,
-        permissions: persistedThreadConfiguration ? undefined : turnConfiguration.permissions || undefined,
-      }),
-    });
-    if (!response.ok) throw new Error((await response.json()).error);
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    while (true) {
-      const { value, done } = await reader.read();
-      buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
-      const lines = buffer.split("\n");
-      buffer = lines.pop();
-      for (const line of lines) {
-        if (!line) continue;
-        const turnEvent = JSON.parse(line);
-        if (turnEvent.type === "thread.started") state.threadId = turnEvent.thread_id;
-        if (turnEvent.type === "item.completed" && turnEvent.item?.type === "agent_message") {
-          state.messages.at(-1).text += turnEvent.item.text;
-          drawMessages();
-          setStatus("Codex response updated.");
-        }
-        if (turnEvent.type === "error") throw new Error(turnEvent.message);
-      }
-      if (done) break;
-    }
-    setStatus("");
-  } catch (error) {
-    state.messages.at(-1).text = `Error: ${error.message}`;
-    setStatus("Disconnected");
-    drawMessages();
-  } finally {
-    activeTurn = false;
-    setThreadControls();
-    saveState();
-    if (keepFocus) prompt.focus();
-  }
+  await followActiveTurn();
+  if (keepFocus) prompt.focus();
 });
+
+const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+async function responseError(response) {
+  let message = `${response.status} ${response.statusText}`.trim();
+  try { message = (await response.json()).error || message; } catch {}
+  const error = new Error(message); error.retryable = response.status >= 500; return error;
+}
+
+function finishActiveTurn(statusMessage = "") {
+  state.activeTurn = null; activeTurn = false; setStatus(statusMessage); setThreadControls(); saveState(); drawMessages();
+}
+
+function applyTurnEvent(turnEvent) {
+  const turn = state.activeTurn;
+  if (!turn || !Number.isSafeInteger(turnEvent.sequence) || turnEvent.sequence <= turn.lastSequence) return false;
+  turn.lastSequence = turnEvent.sequence;
+  if (turnEvent.type === "thread.started") state.threadId = turnEvent.thread_id;
+  if (turnEvent.type === "item.completed" && turnEvent.item?.type === "agent_message") {
+    state.messages[turn.messageIndex].text += turnEvent.item.text; setStatus("Codex response updated.");
+  }
+  if (turnEvent.type === "error") turn.error = turnEvent.message;
+  if (turnEvent.type !== "relay.turn.finished") return false;
+  if (turnEvent.status === "failed") {
+    const assistant = state.messages[turn.messageIndex];
+    if (!assistant.text && turn.error) assistant.text = `Error: ${turn.error}`;
+    finishActiveTurn(turn.error ? `Codex failed: ${turn.error}` : "Codex failed");
+  } else finishActiveTurn();
+  return true;
+}
+
+let followingTurn = false;
+async function followActiveTurn() {
+  if (followingTurn || !state.activeTurn || !appliedConfiguration?.token) return;
+  followingTurn = true; activeTurn = true; setThreadControls(); let retryDelay = 500;
+  try {
+    while (state.activeTurn) {
+      try {
+        const turn = state.activeTurn;
+        if (turn.stage === "starting") {
+          const created = await fetch("/turn", { method: "POST", headers: { ...authorization(), "Content-Type": "application/json" }, body: JSON.stringify({ turnId: turn.id, ...turn.request }) });
+          if (!created.ok) throw await responseError(created);
+          turn.stage = "streaming"; saveState();
+        }
+        const response = await fetch(`/turn/${turn.id}/events?after=${turn.lastSequence}`, { headers: authorization() });
+        if (!response.ok) throw await responseError(response);
+        setStatus("Codex is working…"); retryDelay = 500;
+        const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = "";
+        while (state.activeTurn) {
+          const { value, done } = await reader.read(); buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+          const lines = buffer.split("\n"); buffer = lines.pop();
+          for (const line of lines) if (line && applyTurnEvent(JSON.parse(line))) return;
+          saveState(); drawMessages();
+          if (done) throw new Error("Turn stream ended before completion");
+        }
+      } catch (error) {
+        if (error.retryable === false) { finishActiveTurn(`Turn recovery unavailable: ${error.message}`); return; }
+        setStatus("Connection lost. Reconnecting…"); saveState(); drawMessages(); await wait(retryDelay); retryDelay = Math.min(retryDelay * 2, 10_000);
+      }
+    }
+  } finally { followingTurn = false; }
+}
 
 drawMessages({ forceFollow: true });
 updateVisualViewport();
