@@ -43,13 +43,20 @@ const composer = document.querySelector("#composer");
 const prompt = document.querySelector("#prompt");
 const send = document.querySelector("#send");
 
+const configurationFields = new Map([
+  ["model", { control: model, error: modelError }],
+  ["reasoning", { control: reasoning, error: reasoningError }],
+  ["permissions", { control: permissions, error: permissionsError }],
+  ["fastMode", { control: fastMode, error: fastModeError }],
+]);
+
 const emptyConfiguration = { token: "", model: "", reasoning: "", permissions: "", fastMode: null };
 let state = readJson("relay", { threadId: null, messages: [], activeTurn: null });
 state.activeTurn ||= null;
 let appliedConfiguration = readAppliedConfiguration();
 let configurationDraft = { ...(appliedConfiguration || emptyConfiguration) };
 let tokenDraft = appliedConfiguration?.token || "";
-let info = null;
+let configurationCatalog = null;
 let ready = false;
 let checking = false;
 let activeTurn = Boolean(state.activeTurn);
@@ -143,7 +150,7 @@ function setThreadControls() {
 }
 
 function authorization() { return { "Authorization": `Bearer ${appliedConfiguration.token}` }; }
-function allowedPermissions() { return ["", ...(info?.permissions || []).map(({ id }) => id)]; }
+function allowedPermissions() { return ["", ...(configurationCatalog?.permissions || []).map(({ id }) => id)]; }
 
 function setResumeOpen(open, restoreFocus = true) {
   resumePicker.hidden = !open;
@@ -201,7 +208,7 @@ loadMoreThreads.addEventListener("click", () => loadThreads(loadMoreThreads.data
 function setConfigurationBusy(busy) {
   checking = busy;
   for (const control of [permissions, fastMode, cancelConfiguration, applyConfiguration]) control.disabled = busy;
-  model.disabled = busy || !info;
+  model.disabled = busy || !configurationCatalog;
   reasoning.disabled = busy || !selectedCapabilityModel();
   cancelConfiguration.hidden = !appliedConfiguration;
   configurationProgress.hidden = !busy;
@@ -238,35 +245,25 @@ function showSettingsError(message) {
 function clearConfigurationError() {
   configurationError.hidden = true;
   configurationError.textContent = "";
-  for (const [field, fieldError] of [
-    [model, modelError],
-    [reasoning, reasoningError],
-    [permissions, permissionsError],
-    [fastMode, fastModeError],
-  ]) {
-    fieldError.textContent = "";
-    field.removeAttribute("aria-invalid");
+  for (const { control, error } of configurationFields.values()) {
+    error.textContent = "";
+    control.removeAttribute("aria-invalid");
   }
 }
 
 function showConfigurationError(message, field = null) {
   configurationError.textContent = message;
   configurationError.hidden = false;
-  const fieldError = new Map([
-    [model, modelError],
-    [reasoning, reasoningError],
-    [permissions, permissionsError],
-    [fastMode, fastModeError],
-  ]).get(field);
+  const fieldError = [...configurationFields.values()].find(({ control }) => control === field);
   if (fieldError) {
-    fieldError.textContent = message;
+    fieldError.error.textContent = message;
     field.setAttribute("aria-invalid", "true");
   }
   requestAnimationFrame(() => configurationError.focus());
 }
 
 function renderConfigurationDraft() {
-  const permissionChoices = [option("Default", ""), ...(info?.permissions || []).map((item) => option(item.name, item.id))];
+  const permissionChoices = [option("Default", ""), ...(configurationCatalog?.permissions || []).map((item) => option(item.name, item.id))];
   permissions.replaceChildren(...permissionChoices);
   permissions.value = allowedPermissions().includes(configurationDraft.permissions)
     ? configurationDraft.permissions
@@ -280,9 +277,9 @@ function option(label, value) { return new Option(label, value); }
 
 function renderModelOptions() {
   const choices = [option("Default", "")];
-  if (info) {
-    for (const item of info.models) choices.push(option(item.name, item.id));
-    if (configurationDraft.model && !info.models.some((item) => item.id === configurationDraft.model)) {
+  if (configurationCatalog) {
+    for (const item of configurationCatalog.models) choices.push(option(item.name, item.id));
+    if (configurationDraft.model && !configurationCatalog.models.some((item) => item.id === configurationDraft.model)) {
       choices.push(option(`${configurationDraft.model} (unavailable)`, configurationDraft.model));
     }
   } else if (configurationDraft.model) {
@@ -290,8 +287,8 @@ function renderModelOptions() {
   }
   model.replaceChildren(...choices);
   model.value = configurationDraft.model;
-  model.disabled = checking || !info;
-  modelHint.hidden = Boolean(info);
+  model.disabled = checking || !configurationCatalog;
+  modelHint.hidden = Boolean(configurationCatalog);
   renderReasoningOptions();
 }
 
@@ -308,17 +305,17 @@ function renderReasoningOptions() {
   }
   reasoning.replaceChildren(...choices);
   reasoning.value = configurationDraft.reasoning;
-  reasoning.disabled = checking || !info || !selected;
+  reasoning.disabled = checking || !configurationCatalog || !selected;
   reasoningHint.hidden = Boolean(selected);
-  reasoningHint.textContent = info
+  reasoningHint.textContent = configurationCatalog
     ? "Reasoning choices follow the selected model."
     : "Apply an API token to load reasoning efforts.";
   renderFastMode();
 }
 
 function selectedCapabilityModel() {
-  const selectedId = configurationDraft.model || info?.defaults?.model;
-  return info?.models.find((item) => item.id === selectedId);
+  const selectedId = configurationDraft.model || configurationCatalog?.defaults?.model;
+  return configurationCatalog?.models.find((item) => item.id === selectedId);
 }
 
 function renderFastMode() {
@@ -370,7 +367,7 @@ function configurationFailure(message, field = null) {
   return error;
 }
 
-async function fetchInfo(configurationToken) {
+async function fetchConfigurationCatalog(configurationToken) {
   let response;
   try {
     response = await fetch("/configuration", { headers: { "Authorization": `Bearer ${configurationToken}` } });
@@ -409,8 +406,8 @@ async function checkPersistedConfiguration() {
   setStatus("Checking Settings…");
   setSettingsBusy(true);
   try {
-    info = await fetchInfo(appliedConfiguration.token);
-    const normalized = normalizeConfiguration(appliedConfiguration, info);
+    configurationCatalog = await fetchConfigurationCatalog(appliedConfiguration.token);
+    const normalized = normalizeConfiguration(appliedConfiguration, configurationCatalog);
     const changed = JSON.stringify(normalized) !== JSON.stringify(appliedConfiguration);
     appliedConfiguration = normalized;
     configurationDraft = { ...normalized };
@@ -491,12 +488,12 @@ applySettings.addEventListener("click", async () => {
   const previousConfiguration = appliedConfiguration;
   setSettingsBusy(true);
   try {
-    const checkedInfo = await fetchInfo(tokenDraft);
+    const checkedCatalog = await fetchConfigurationCatalog(tokenDraft);
     const tokenChanged = tokenDraft !== previousConfiguration?.token;
-    info = checkedInfo;
+    configurationCatalog = checkedCatalog;
     appliedConfiguration = tokenChanged
       ? { token: tokenDraft, model: "", reasoning: "", permissions: "", fastMode: null }
-      : normalizeConfiguration(previousConfiguration, checkedInfo);
+      : normalizeConfiguration(previousConfiguration, checkedCatalog);
     configurationDraft = { ...appliedConfiguration };
     saveAppliedConfiguration();
     ready = true;
@@ -537,7 +534,7 @@ applyConfiguration.addEventListener("click", async () => {
   };
   setConfigurationBusy(true);
   try {
-    const validationFailure = validateDraft(configurationDraft, info);
+    const validationFailure = validateDraft(configurationDraft, configurationCatalog);
     if (validationFailure) {
       renderModelOptions();
       showConfigurationError(validationFailure.message, validationFailure.field);
@@ -552,11 +549,9 @@ applyConfiguration.addEventListener("click", async () => {
     }) });
     if (!response.ok) {
       const failure = await response.json().catch(() => ({}));
-      const fields = { model, reasoning, permissions, fastMode };
       for (const [name, message] of Object.entries(failure.fieldErrors || {})) {
-        const field = fields[name];
-        const fieldError = new Map([[model, modelError], [reasoning, reasoningError], [permissions, permissionsError], [fastMode, fastModeError]]).get(field);
-        if (field && fieldError) { field.setAttribute("aria-invalid", "true"); fieldError.textContent = message; }
+        const field = configurationFields.get(name);
+        if (field) { field.control.setAttribute("aria-invalid", "true"); field.error.textContent = message; }
       }
       throw configurationFailure(failure.error || "Configuration could not be applied. Try again.");
     }

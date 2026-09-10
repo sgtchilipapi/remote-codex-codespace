@@ -98,6 +98,6 @@ test("an explicit configuration overrides a resumed Thread on its next Turn", as
   });
   await response.text();
   assert.deepEqual(calls.at(-1), { method: "turn/start", params: {
-    threadId: uuid, input: [{ type: "text", text: "continue" }], model: "gpt-5", effort: "high", permissions: "read-only",
+    threadId: uuid, input: [{ type: "text", text: "continue" }], model: "gpt-5", effort: "high", sandboxPolicy: "read-only", approvalPolicy: "untrusted",
   } });
 });

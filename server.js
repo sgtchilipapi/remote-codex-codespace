@@ -44,6 +44,11 @@ function publicThread(thread, currentThreadId) { const preview = String(thread.p
 function itemText(item) { if (typeof item.text === "string") return item.text; if (typeof item.message === "string") return item.message; if (Array.isArray(item.content)) return item.content.filter((part) => ["text", "input_text", "output_text"].includes(part.type)).map((part) => part.text || "").join(""); return ""; }
 function normalizeItems(turns, anchorId) { const output = []; for (const turn of [...turns].reverse()) for (const item of turn.items || []) { if (!item.id || item.id === anchorId) continue; const type = String(item.type || "").toLowerCase(); let role; if (["usermessage", "user_message"].includes(type)) role = "user"; else if (["agentmessage", "agent_message", "error"].includes(type)) role = "assistant"; else continue; const text = itemText(item); if (text) output.push({ id: item.id, role, text: type === "error" ? `Error: ${text}` : text }); } return output; }
 function validateCursor(value, required = false) { if ((required && !value) || (value != null && (typeof value !== "string" || !value || Buffer.byteLength(value) > 4096 || /[\u0000-\u001f\u007f]/.test(value)))) throw new RelayError(400, "Invalid cursor"); }
+function applyTurnPermissions(params, permissions) {
+  if (!permissions) return;
+  params.sandboxPolicy = permissions;
+  params.approvalPolicy = permissions === "read-only" ? "untrusted" : "on-request";
+}
 
 const PERMISSIONS = [{ id: "read-only", name: "read only" }, { id: "workspace-write", name: "workspace write" }];
 function configurationModel(item) {
@@ -148,8 +153,9 @@ function createRelay({ appServer, env = process.env, turnRetentionMs = TURN_RETE
       if (request.threadId) { await codex.request("thread/resume", { threadId: request.threadId, excludeTurns: true }); turn.threadId = request.threadId; }
       else { const params = { cwd: workdir }; if (request.model) params.model = request.model; if (request.reasoning && !request.configurationRevision) params.effort = request.reasoning; if (request.permissions) params.sandbox = request.permissions; turn.threadId = (await codex.request("thread/start", params)).thread.id; }
       publishTurnEvent(turn, { type: "thread.started", thread_id: turn.threadId });
-      const params = { threadId: turn.threadId, input: [{ type: "text", text: request.prompt }] }; if (request.threadId && request.model) params.model = request.model; if (request.threadId && request.reasoning) params.effort = request.reasoning; if (request.threadId && request.permissions) params.permissions = request.permissions;
+      const params = { threadId: turn.threadId, input: [{ type: "text", text: request.prompt }] }; if (request.threadId && request.model) params.model = request.model; if (request.threadId && request.reasoning) params.effort = request.reasoning;
       if (!request.threadId && request.configurationRevision && request.reasoning) params.effort = request.reasoning;
+      if (request.threadId || request.configurationRevision) applyTurnPermissions(params, request.permissions);
       if (request.fastMode) params.serviceTier = "priority";
       turn.codexTurnId = (await codex.request("turn/start", params)).turn.id;
       if (turn.status !== "running") { codex.request("turn/interrupt", { threadId: turn.threadId, turnId: turn.codexTurnId }).catch(() => {}); return; }
@@ -163,7 +169,8 @@ function createRelay({ appServer, env = process.env, turnRetentionMs = TURN_RETE
     if (requestedId && !UUID.test(requestedId)) throw new RelayError(400, "turnId is invalid");
     if (configurationRevision && configurationRevision !== currentConfigurationRevision) throw new RelayError(409, "Configuration revision is obsolete");
     if (fastMode && currentResolvedConfiguration?.serviceTier !== "priority") throw new RelayError(400, "Fast mode is unsupported");
-    const id = requestedId || randomUUID(); const request = { prompt, threadId, model, reasoning, permissions, fastMode, configurationRevision }; const requestKey = JSON.stringify(request);
+    const boundConfiguration = configurationRevision ? currentResolvedConfiguration : { model, reasoning, permissions, fastMode };
+    const id = requestedId || randomUUID(); const request = { prompt, threadId, ...boundConfiguration, configurationRevision }; const requestKey = JSON.stringify(request);
     const existing = turns.get(id); if (existing) { if (existing.requestKey !== requestKey) throw new RelayError(409, "turnId already belongs to a different Turn"); return res.status(202).json({ turnId: id, eventsUrl: `/turn/${id}/events` }); }
     if (hasActiveTurn()) throw new RelayError(409, "A Turn is active"); evictCompletedTurns();
     const turn = { id, requestKey, status: "running", threadId: null, codexTurnId: null, events: [], subscribers: new Set(), nextSequence: 1, bufferedBytes: 0, pendingNotifications: [], pendingNotificationBytes: 0 };
