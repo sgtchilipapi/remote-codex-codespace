@@ -182,9 +182,18 @@ button:disabled, input:disabled, select:disabled, textarea:disabled { opacity: .
 
 #send { flex: 0 0 auto; min-height: 44px; }
 
+.icon-button {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 44px;
+  width: 44px;
+  min-width: 44px;
+  height: 44px;
+  padding: 0;
+}
+
 @media (max-width: 599px) {
   main { gap: 8px; }
-  #show-status { display: none; }
   main.configuration-open #configuration { flex: 1 1 auto; max-height: none; }
   main.configuration-open #messages,
   main.configuration-open #status,

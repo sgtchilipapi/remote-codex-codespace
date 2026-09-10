@@ -28,6 +28,7 @@ An implementation-ready specification for a focused responsive cleanup of the Mo
 - [Specify Configuration panel state and validation](tickets/03-specify-configuration-panel.md): Treat Configuration as an authenticated, transactional draft over the last applied values, with explicit defaults, atomic Apply, discard-on-Cancel, startup revalidation, actionable failures, and active-Turn locking.
 - [Specify Thread scrolling and composer behavior](tickets/04-specify-thread-and-composer.md): Make the visual-viewport app shell and Thread own scrolling, cap the auto-growing composer, follow streaming only within an 80px bottom zone, preserve reader position and focus, and isolate fenced code overflow inside messages.
 - [Define the responsive acceptance contract](tickets/05-define-acceptance-contract.md): Gate implementation with a compact Playwright Chromium behavior/geometry suite, focused real-device Safari and Chrome smoke passes, and explicit mobile and desktop regression boundaries.
+- [Keep the Status action reachable on small screens](tickets/06-keep-status-action-reachable.md): Place the existing Status action immediately after **Send** as an accessible 44×44px icon button so it remains available in compact layouts.
 
 ## Not yet specified
 

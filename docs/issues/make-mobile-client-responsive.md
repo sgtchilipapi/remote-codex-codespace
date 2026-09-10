@@ -1,7 +1,7 @@
 # Make the Mobile Client responsive
 
 Label: `ready-for-agent`
-Status: open
+Status: closed
 Assignee: codex
 
 ## Description
@@ -54,3 +54,7 @@ The planning map is the detailed acceptance reference if an edge case is unclear
 Implemented the responsive Mobile Client contract without changing the Relay API. The Chromium behavior/geometry suite and static syntax checks pass. Added [`scripts/verify-mobile-client.sh`](../../scripts/verify-mobile-client.sh) to guide and record the required iPhone Safari and Android Chrome smoke passes.
 
 The issue remains open until those two real-device browser passes are recorded, as required by the acceptance contract.
+
+## Resolution
+
+Implemented the responsive Mobile Client contract and the follow-up fix that keeps the Status action reachable beside **Send** on compact screens. The full 30-test Chromium behavior and geometry suite passes across the target viewport matrix, and real-device mobile re-verification was reported all green on 2026-09-10. No Relay or Codespace changes were required.

@@ -636,6 +636,16 @@ test("compact controls expose labels, visible focus, live status, and usable tar
   await expect(page.getByLabel("Prompt")).toBeVisible();
   await expect(page.locator("#status")).toHaveAttribute("aria-live", "polite");
 
+  const showStatus = page.getByRole("button", { name: "Show status" });
+  await expect(showStatus).toBeVisible();
+  await expect(showStatus).toHaveAttribute("title", "Show status");
+  expect(await showStatus.evaluate((button) => ({
+    previousId: button.previousElementSibling?.id,
+    text: button.textContent.trim(),
+    width: button.getBoundingClientRect().width,
+    height: button.getBoundingClientRect().height,
+  }))).toEqual({ previousId: "send", text: "", width: 44, height: 44 });
+
   await configure.click();
   await expect(page.getByRole("heading", { name: "Configuration" })).toBeFocused();
   await expect(page.getByLabel("API token")).toBeVisible();
