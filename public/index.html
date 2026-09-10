@@ -65,12 +65,18 @@
       </div>
       <div class="field">
         <label for="permissions">Permissions</label>
-        <select id="permissions" aria-describedby="permissions-error">
-          <option value="">Default</option>
-          <option value="read-only">read only</option>
-          <option value="workspace-write">workspace write</option>
-        </select>
+        <select id="permissions" aria-describedby="permissions-error"><option value="">Default</option></select>
         <span id="permissions-error" class="field-error"></span>
+      </div>
+      <div class="field">
+        <label for="fast-mode">Fast mode</label>
+        <select id="fast-mode" aria-describedby="fast-mode-hint fast-mode-error">
+          <option value="">Default</option>
+          <option value="on">On</option>
+          <option value="off">Off</option>
+        </select>
+        <span id="fast-mode-hint" class="field-hint">Availability follows the selected model.</span>
+        <span id="fast-mode-error" class="field-error"></span>
       </div>
     </div>
     <p id="configuration-progress" role="status" aria-live="polite" hidden></p>

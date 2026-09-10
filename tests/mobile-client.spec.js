@@ -13,6 +13,7 @@ const appliedConfiguration = {
   model: "",
   reasoning: "",
   permissions: "",
+  fastMode: null,
 };
 
 const modelInfo = {
@@ -23,6 +24,8 @@ const modelInfo = {
       isDefault: true,
       defaultReasoning: "medium",
       reasoning: ["low", "medium", "high"],
+      serviceTiers: [{ id: "priority", name: "Fast" }],
+      defaultServiceTier: null,
     },
     {
       id: "codex-mini",
@@ -30,16 +33,19 @@ const modelInfo = {
       isDefault: false,
       defaultReasoning: "low",
       reasoning: ["low"],
+      serviceTiers: [],
+      defaultServiceTier: null,
     },
   ],
-  rateLimits: { planType: "test" },
+  permissions: [{ id: "read-only", name: "read only" }, { id: "workspace-write", name: "workspace write" }],
+  defaults: { model: "codex-1", reasoning: "medium", permissions: "workspace-write", fastMode: false },
 };
 
 async function openConfiguredClient(page) {
   await page.addInitScript((configuration) => {
     localStorage.setItem("relayConfiguration", JSON.stringify(configuration));
   }, appliedConfiguration);
-  await page.route("**/info", (route) => route.fulfill({ json: modelInfo }));
+  await page.route("**/configuration", (route) => route.fulfill({ json: modelInfo }));
   await page.goto("/");
   await expect(page.getByRole("button", { name: "Configure" })).toBeEnabled();
 }
@@ -127,7 +133,7 @@ test("startup checking locks every Thread entry action until live availability l
   await page.addInitScript((configuration) => {
     localStorage.setItem("relayConfiguration", JSON.stringify(configuration));
   }, obsoleteConfiguration);
-  await page.route("**/info", async (route) => {
+  await page.route("**/configuration", async (route) => {
     await new Promise((resolve) => { releaseInfo = resolve; });
     await route.fulfill({ json: modelInfo });
   });
@@ -148,6 +154,7 @@ test("startup checking locks every Thread entry action until live availability l
     model: "",
     reasoning: "",
     permissions: "workspace-write",
+    fastMode: null,
   });
   await expect(page.getByRole("status")).toContainText("reset to Default");
 });
@@ -162,7 +169,7 @@ test("failed startup checking opens Settings with the committed token and no can
   await page.addInitScript((configuration) => {
     localStorage.setItem("relayConfiguration", JSON.stringify(configuration));
   }, persistedConfiguration);
-  await page.route("**/info", (route) => route.fulfill({ status: 401, json: { error: "Unauthorized" } }));
+  await page.route("**/configuration", (route) => route.fulfill({ status: 401, json: { error: "Unauthorized" } }));
   await page.goto("/");
 
   await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
@@ -178,7 +185,7 @@ test("successful token replacement preserves the Thread and resets requested Con
     localStorage.setItem("relayConfiguration", JSON.stringify(configuration));
     localStorage.setItem("relay", JSON.stringify({ threadId: null, messages: [{ role: "assistant", text: "Kept transcript" }] }));
   }, { token: "valid-token", model: "codex-1", reasoning: "high", permissions: "read-only" });
-  await page.route("**/info", (route) => {
+  await page.route("**/configuration", (route) => {
     authorizations.push(route.request().headers().authorization);
     return route.fulfill({ json: modelInfo });
   });
@@ -198,6 +205,7 @@ test("successful token replacement preserves the Thread and resets requested Con
     model: "",
     reasoning: "",
     permissions: "",
+    fastMode: null,
   });
 });
 
@@ -205,7 +213,7 @@ test("pending Settings validation locks conflicting actions and cannot submit tw
   let requestCount = 0;
   let releaseInfo;
   await page.goto("/");
-  await page.route("**/info", async (route) => {
+  await page.route("**/configuration", async (route) => {
     requestCount += 1;
     await new Promise((resolve) => { releaseInfo = resolve; });
     await route.fulfill({ json: modelInfo });
@@ -240,7 +248,7 @@ test("failed token replacement restores its committed token and authenticated st
   await page.addInitScript((configuration) => {
     localStorage.setItem("relayConfiguration", JSON.stringify(configuration));
   }, appliedConfiguration);
-  await page.route("**/info", (route) => {
+  await page.route("**/configuration", (route) => {
     requestCount += 1;
     if (requestCount === 1) return route.fulfill({ json: modelInfo });
     return route.fulfill({ status: 401, json: { error: "Unauthorized" } });
@@ -270,7 +278,7 @@ for (const [name, responseStatus, expected] of [
     await page.addInitScript((configuration) => {
       localStorage.setItem("relayConfiguration", JSON.stringify(configuration));
     }, appliedConfiguration);
-    await page.route("**/info", (route) => {
+    await page.route("**/configuration", (route) => {
       requestCount += 1;
       if (requestCount === 1) return route.fulfill({ json: modelInfo });
       return route.fulfill({ status: responseStatus, json: { error: "private detail" } });
@@ -292,7 +300,7 @@ test("failed Settings validation handles a network failure without changing auth
   await page.addInitScript((configuration) => {
     localStorage.setItem("relayConfiguration", JSON.stringify(configuration));
   }, appliedConfiguration);
-  await page.route("**/info", (route) => {
+  await page.route("**/configuration", (route) => {
     requestCount += 1;
     return requestCount === 1 ? route.fulfill({ json: modelInfo }) : route.abort("failed");
   });
@@ -324,13 +332,62 @@ test("Configuration still normalizes reasoning when its model changes", async ({
   await page.addInitScript((configuration) => {
     localStorage.setItem("relayConfiguration", JSON.stringify(configuration));
   }, { token: "valid-token", model: "codex-1", reasoning: "high", permissions: "read-only" });
-  await page.route("**/info", (route) => route.fulfill({ json: modelInfo }));
+  await page.route("**/configuration", (route) => route.fulfill({ json: modelInfo }));
   await page.goto("/");
   await page.getByRole("button", { name: "Configure" }).click();
   await page.getByLabel("Model", { exact: true }).selectOption("codex-mini");
 
   await expect(page.getByLabel("Reasoning effort")).toHaveValue("");
   await expect(page.getByLabel("Permissions")).toHaveValue("read-only");
+});
+
+test("Configuration constrains Fast mode and atomically applies a live-validated draft once", async ({ page }) => {
+  let resolveRequests = 0;
+  let releaseResolve;
+  await page.route("**/configuration/resolve", async (route) => {
+    resolveRequests += 1;
+    await new Promise((resolve) => { releaseResolve = resolve; });
+    await route.fulfill({ json: { configuration: { model: "codex-1", reasoning: "high", permissions: "read-only", fastMode: true, serviceTier: "priority" }, configurationRevision: "revision-1" } });
+  });
+  await openConfiguredClient(page);
+  await page.getByRole("button", { name: "Configure" }).click();
+  await page.getByLabel("Model", { exact: true }).selectOption("codex-1");
+  await page.getByLabel("Reasoning effort").selectOption("high");
+  await page.getByLabel("Permissions").selectOption("read-only");
+  await page.getByLabel("Fast mode").selectOption("on");
+  await page.getByRole("button", { name: "Apply and close" }).click();
+
+  await expect(page.getByRole("button", { name: "Apply and close" })).toBeDisabled();
+  await page.getByRole("button", { name: "Apply and close" }).evaluate((button) => button.click());
+  expect(resolveRequests).toBe(1);
+  expect(await page.evaluate(() => JSON.parse(localStorage.relayConfiguration))).toEqual(appliedConfiguration);
+  releaseResolve();
+  await expect(page.getByRole("button", { name: "Configure" })).toBeFocused();
+  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.relayConfiguration))).toEqual({ token: "valid-token", model: "codex-1", reasoning: "high", permissions: "read-only", fastMode: true, configurationRevision: "revision-1" });
+});
+
+test("Configuration keeps an unsupported draft and shows stable server field errors", async ({ page }) => {
+  await page.route("**/configuration/resolve", (route) => route.fulfill({ status: 400, json: { error: "Configuration is unsupported", fieldErrors: { fastMode: "Fast mode is not supported by the selected model." } } }));
+  await openConfiguredClient(page);
+  await page.getByRole("button", { name: "Configure" }).click();
+  await page.getByLabel("Model", { exact: true }).selectOption("codex-1");
+  await page.getByLabel("Fast mode").selectOption("on");
+  await page.getByRole("button", { name: "Apply and close" }).click();
+
+  await expect(page.getByLabel("Fast mode")).toHaveValue("on");
+  await expect(page.getByLabel("Fast mode")).toHaveAttribute("aria-invalid", "true");
+  await expect(page.locator("#fast-mode-error")).toContainText("not supported");
+  expect(await page.evaluate(() => JSON.parse(localStorage.relayConfiguration))).toEqual(appliedConfiguration);
+});
+
+test("changing to a model without Fast support clears and disables the Fast draft", async ({ page }) => {
+  await openConfiguredClient(page);
+  await page.getByRole("button", { name: "Configure" }).click();
+  await page.getByLabel("Model", { exact: true }).selectOption("codex-1");
+  await page.getByLabel("Fast mode").selectOption("on");
+  await page.getByLabel("Model", { exact: true }).selectOption("codex-mini");
+  await expect(page.getByLabel("Fast mode")).toHaveValue("");
+  await expect(page.getByLabel("Fast mode")).toBeDisabled();
 });
 
 test("an active Turn locks actions, keeps prompt focus, and uses Applied configuration", async ({ page }) => {
@@ -451,7 +508,7 @@ test("agent fenced code is safe and owns horizontal overflow", async ({ page }) 
       }],
     }));
   }, { configuration: appliedConfiguration, code: longCode, ordinaryToken: longToken });
-  await page.route("**/info", (route) => route.fulfill({ json: modelInfo }));
+  await page.route("**/configuration", (route) => route.fulfill({ json: modelInfo }));
   await page.goto("/");
   await expect(page.getByRole("button", { name: "Configure" })).toBeEnabled();
 
@@ -482,7 +539,7 @@ test("streaming follows within 80px and preserves a reader who scrolls away", as
     localStorage.setItem("relay", JSON.stringify({ threadId: "abc-123", messages }));
   }, { configuration: appliedConfiguration, messages: seededMessages });
   await installStreamingTurn(page);
-  await page.route("**/info", (route) => route.fulfill({ json: modelInfo }));
+  await page.route("**/configuration", (route) => route.fulfill({ json: modelInfo }));
   await page.goto("/");
   await expect(page.getByRole("button", { name: "Configure" })).toBeEnabled();
   await page.getByLabel("Prompt").fill("continue");
@@ -544,7 +601,7 @@ test("streaming batches bottom-follow scrolling to one animation frame", async (
     localStorage.setItem("relay", JSON.stringify({ threadId: "abc-123", messages }));
   }, { configuration: appliedConfiguration, messages: seededMessages });
   await installStreamingTurn(page);
-  await page.route("**/info", (route) => route.fulfill({ json: modelInfo }));
+  await page.route("**/configuration", (route) => route.fulfill({ json: modelInfo }));
   await page.goto("/");
   await expect(page.getByRole("button", { name: "Configure" })).toBeEnabled();
   await page.getByLabel("Prompt").fill("continue");
@@ -576,7 +633,7 @@ test("viewport resize follows the bottom or preserves the visible reading anchor
     localStorage.setItem("relayConfiguration", JSON.stringify(configuration));
     localStorage.setItem("relay", JSON.stringify({ threadId: "abc-123", messages }));
   }, { configuration: appliedConfiguration, messages: seededMessages });
-  await page.route("**/info", (route) => route.fulfill({ json: modelInfo }));
+  await page.route("**/configuration", (route) => route.fulfill({ json: modelInfo }));
   await page.goto("/");
   await expect(page.getByRole("button", { name: "Configure" })).toBeEnabled();
   await page.locator("#messages").evaluate((element) => {
@@ -625,7 +682,7 @@ test("first use opens non-cancellable Settings as a focused view", async ({ page
 
 test("missing token is rejected without contacting the Relay", async ({ page }) => {
   let requestCount = 0;
-  await page.route("**/info", (route) => {
+  await page.route("**/configuration", (route) => {
     requestCount += 1;
     return route.fulfill({ json: modelInfo });
   });

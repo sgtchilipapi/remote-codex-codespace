@@ -30,6 +30,7 @@ An implementation-ready specification that resolves every finding in [`responsiv
 - [Specify the Relay configuration and Status contract](tickets/07-specify-relay-configuration-and-status-contract.md): Separate catalog, read-only pre-Turn resolution, and scoped Status routes; validate live combinations, retain notification-derived effective state in memory, and return independently fresh or unavailable fields through sanitized partial-success envelopes.
 - [Define the findings acceptance contract](tickets/06-define-findings-acceptance-contract.md): Make deterministic Node Relay and Chromium Playwright coverage under `npm test` the sole gate, exercising every distinct observable outcome across the established responsive viewport matrix.
 - [Separate Settings and establish the authenticated entry gate](tickets/08-separate-settings-and-authenticated-entry.md): Isolate token authentication in non-cancellable first-use and transactional later Settings, gating Thread entry on live availability while preserving Thread state across token edits.
+- [Add capability-driven Configuration with Fast mode](tickets/09-add-capability-driven-configuration.md): Project live Codex capabilities into a transactional Configuration draft, validate one atomic revision, and carry advertised Fast mode into the first Turn.
 
 ## Not yet specified
 
@@ -45,10 +46,9 @@ None.
 
 ## Open child tickets
 
-1. [Add capability-driven Configuration with Fast mode](tickets/09-add-capability-driven-configuration.md)
-2. [Make New a revision-safe local Thread entry](tickets/10-make-new-revision-safe-local-entry.md)
-3. [Resume Eligible Threads with canonical effective state](tickets/11-resume-eligible-threads-with-effective-state.md)
-4. [Render item-owned assistant and Activity bubbles](tickets/12-render-item-owned-assistant-and-activity-bubbles.md)
-5. [Rehydrate persisted Thread and local-New views safely](tickets/13-rehydrate-persisted-thread-views.md)
-6. [Expose and present effective Status end to end](tickets/14-expose-and-present-effective-status.md)
-7. [Retire the compatibility facade and enforce the release matrix](tickets/15-retire-info-and-enforce-release-matrix.md)
+1. [Make New a revision-safe local Thread entry](tickets/10-make-new-revision-safe-local-entry.md)
+2. [Resume Eligible Threads with canonical effective state](tickets/11-resume-eligible-threads-with-effective-state.md)
+3. [Render item-owned assistant and Activity bubbles](tickets/12-render-item-owned-assistant-and-activity-bubbles.md)
+4. [Rehydrate persisted Thread and local-New views safely](tickets/13-rehydrate-persisted-thread-views.md)
+5. [Expose and present effective Status end to end](tickets/14-expose-and-present-effective-status.md)
+6. [Retire the compatibility facade and enforce the release matrix](tickets/15-retire-info-and-enforce-release-matrix.md)

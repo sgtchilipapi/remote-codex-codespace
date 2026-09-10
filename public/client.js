@@ -33,6 +33,9 @@ const reasoningHint = document.querySelector("#reasoning-hint");
 const reasoningError = document.querySelector("#reasoning-error");
 const permissions = document.querySelector("#permissions");
 const permissionsError = document.querySelector("#permissions-error");
+const fastMode = document.querySelector("#fast-mode");
+const fastModeHint = document.querySelector("#fast-mode-hint");
+const fastModeError = document.querySelector("#fast-mode-error");
 const messages = document.querySelector("#messages");
 const loadOlderHistory = document.querySelector("#load-older-history");
 const status = document.querySelector("#status");
@@ -40,8 +43,7 @@ const composer = document.querySelector("#composer");
 const prompt = document.querySelector("#prompt");
 const send = document.querySelector("#send");
 
-const emptyConfiguration = { token: "", model: "", reasoning: "", permissions: "" };
-const allowedPermissions = ["", "read-only", "workspace-write"];
+const emptyConfiguration = { token: "", model: "", reasoning: "", permissions: "", fastMode: null };
 let state = readJson("relay", { threadId: null, messages: [], activeTurn: null });
 state.activeTurn ||= null;
 let appliedConfiguration = readAppliedConfiguration();
@@ -75,6 +77,8 @@ function readAppliedConfiguration() {
       model: typeof stored.model === "string" ? stored.model : "",
       reasoning: typeof stored.reasoning === "string" ? stored.reasoning : "",
       permissions: typeof stored.permissions === "string" ? stored.permissions : "",
+      fastMode: typeof stored.fastMode === "boolean" ? stored.fastMode : null,
+      ...(typeof stored.configurationRevision === "string" ? { configurationRevision: stored.configurationRevision } : {}),
     };
   }
 
@@ -85,6 +89,7 @@ function readAppliedConfiguration() {
     model: localStorage.getItem("model") || "",
     reasoning: localStorage.getItem("reasoning") || "",
     permissions: localStorage.getItem("permissions") || "",
+    fastMode: null,
   };
   localStorage.setItem("relayConfiguration", JSON.stringify(migrated));
   return migrated;
@@ -138,6 +143,7 @@ function setThreadControls() {
 }
 
 function authorization() { return { "Authorization": `Bearer ${appliedConfiguration.token}` }; }
+function allowedPermissions() { return ["", ...(info?.permissions || []).map(({ id }) => id)]; }
 
 function setResumeOpen(open, restoreFocus = true) {
   resumePicker.hidden = !open;
@@ -194,10 +200,9 @@ loadMoreThreads.addEventListener("click", () => loadThreads(loadMoreThreads.data
 
 function setConfigurationBusy(busy) {
   checking = busy;
-  for (const control of [permissions, cancelConfiguration, applyConfiguration]) control.disabled = busy;
+  for (const control of [permissions, fastMode, cancelConfiguration, applyConfiguration]) control.disabled = busy;
   model.disabled = busy || !info;
-  const selectedModel = info?.models.find((item) => item.id === configurationDraft.model);
-  reasoning.disabled = busy || !selectedModel;
+  reasoning.disabled = busy || !selectedCapabilityModel();
   cancelConfiguration.hidden = !appliedConfiguration;
   configurationProgress.hidden = !busy;
   configurationProgress.textContent = busy ? "Checking configuration…" : "";
@@ -237,6 +242,7 @@ function clearConfigurationError() {
     [model, modelError],
     [reasoning, reasoningError],
     [permissions, permissionsError],
+    [fastMode, fastModeError],
   ]) {
     fieldError.textContent = "";
     field.removeAttribute("aria-invalid");
@@ -250,6 +256,7 @@ function showConfigurationError(message, field = null) {
     [model, modelError],
     [reasoning, reasoningError],
     [permissions, permissionsError],
+    [fastMode, fastModeError],
   ]).get(field);
   if (fieldError) {
     fieldError.textContent = message;
@@ -259,8 +266,9 @@ function showConfigurationError(message, field = null) {
 }
 
 function renderConfigurationDraft() {
-  token.value = configurationDraft.token;
-  permissions.value = allowedPermissions.includes(configurationDraft.permissions)
+  const permissionChoices = [option("Default", ""), ...(info?.permissions || []).map((item) => option(item.name, item.id))];
+  permissions.replaceChildren(...permissionChoices);
+  permissions.value = allowedPermissions().includes(configurationDraft.permissions)
     ? configurationDraft.permissions
     : "";
   renderModelOptions();
@@ -288,7 +296,7 @@ function renderModelOptions() {
 }
 
 function renderReasoningOptions() {
-  const selected = info?.models.find((item) => item.id === configurationDraft.model);
+  const selected = selectedCapabilityModel();
   const choices = [option("Default", "")];
   if (selected) {
     for (const effort of selected.reasoning) choices.push(option(effort, effort));
@@ -303,8 +311,22 @@ function renderReasoningOptions() {
   reasoning.disabled = checking || !info || !selected;
   reasoningHint.hidden = Boolean(selected);
   reasoningHint.textContent = info
-    ? "Choose a model to select an explicit reasoning effort."
+    ? "Reasoning choices follow the selected model."
     : "Apply an API token to load reasoning efforts.";
+  renderFastMode();
+}
+
+function selectedCapabilityModel() {
+  const selectedId = configurationDraft.model || info?.defaults?.model;
+  return info?.models.find((item) => item.id === selectedId);
+}
+
+function renderFastMode() {
+  const supported = Boolean(selectedCapabilityModel()?.serviceTiers.some(({ id }) => id === "priority"));
+  if (!supported && configurationDraft.fastMode === true) configurationDraft.fastMode = null;
+  fastMode.value = configurationDraft.fastMode == null ? "" : configurationDraft.fastMode ? "on" : "off";
+  fastMode.disabled = checking || !supported;
+  fastModeHint.textContent = supported ? "Uses the model's advertised Fast service tier." : "Fast mode is unavailable for this model.";
 }
 
 function normalizeConfiguration(candidate, modelInfo) {
@@ -313,24 +335,30 @@ function normalizeConfiguration(candidate, modelInfo) {
   if (normalized.model && !selected) {
     normalized.model = "";
     normalized.reasoning = "";
+    normalized.fastMode = null;
     return normalized;
   }
-  if (!normalized.model) normalized.reasoning = "";
-  if (normalized.reasoning && !selected.reasoning.includes(normalized.reasoning)) {
+  const effectiveSelected = selectedCapabilityFor(modelInfo, normalized);
+  if (normalized.reasoning && !effectiveSelected?.reasoning.includes(normalized.reasoning)) {
     normalized.reasoning = "";
   }
+  if (normalized.fastMode === true && !selectedCapabilityFor(modelInfo, normalized)?.serviceTiers.some(({ id }) => id === "priority")) normalized.fastMode = null;
   return normalized;
 }
 
+function selectedCapabilityFor(modelInfo, candidate) {
+  return modelInfo.models.find((item) => item.id === (candidate.model || modelInfo.defaults?.model));
+}
+
 function validateDraft(candidate, modelInfo) {
-  const selected = modelInfo.models.find((item) => item.id === candidate.model);
+  const selected = selectedCapabilityFor(modelInfo, candidate);
   if (candidate.model && !selected) {
     return { message: "The selected model is no longer available.", field: model };
   }
   if (candidate.reasoning && (!selected || !selected.reasoning.includes(candidate.reasoning))) {
     return { message: "The selected reasoning effort is not supported by this model.", field: reasoning };
   }
-  if (!allowedPermissions.includes(candidate.permissions)) {
+  if (!allowedPermissions().includes(candidate.permissions)) {
     return { message: "The selected permissions are invalid.", field: permissions };
   }
   return null;
@@ -345,7 +373,7 @@ function configurationFailure(message, field = null) {
 async function fetchInfo(configurationToken) {
   let response;
   try {
-    response = await fetch("/info", { headers: { "Authorization": `Bearer ${configurationToken}` } });
+    response = await fetch("/configuration", { headers: { "Authorization": `Bearer ${configurationToken}` } });
   } catch {
     throw configurationFailure("Relay or Codespace information is unavailable. Try again.");
   }
@@ -467,7 +495,7 @@ applySettings.addEventListener("click", async () => {
     const tokenChanged = tokenDraft !== previousConfiguration?.token;
     info = checkedInfo;
     appliedConfiguration = tokenChanged
-      ? { token: tokenDraft, model: "", reasoning: "", permissions: "" }
+      ? { token: tokenDraft, model: "", reasoning: "", permissions: "", fastMode: null }
       : normalizeConfiguration(previousConfiguration, checkedInfo);
     configurationDraft = { ...appliedConfiguration };
     saveAppliedConfiguration();
@@ -486,9 +514,10 @@ applySettings.addEventListener("click", async () => {
 });
 
 permissions.addEventListener("change", () => { configurationDraft.permissions = permissions.value; });
+fastMode.addEventListener("change", () => { configurationDraft.fastMode = fastMode.value === "" ? null : fastMode.value === "on"; });
 model.addEventListener("change", () => {
   configurationDraft.model = model.value;
-  const selected = info?.models.find((item) => item.id === model.value);
+  const selected = selectedCapabilityModel();
   if (!selected || !selected.reasoning.includes(configurationDraft.reasoning)) {
     configurationDraft.reasoning = "";
   }
@@ -504,6 +533,7 @@ applyConfiguration.addEventListener("click", async () => {
     model: model.value,
     reasoning: reasoning.value,
     permissions: permissions.value,
+    fastMode: fastMode.value === "" ? null : fastMode.value === "on",
   };
   setConfigurationBusy(true);
   try {
@@ -514,7 +544,24 @@ applyConfiguration.addEventListener("click", async () => {
       return;
     }
 
-    appliedConfiguration = { ...configurationDraft };
+    const response = await fetch("/configuration/resolve", { method: "POST", headers: { ...authorization(), "Content-Type": "application/json" }, body: JSON.stringify({
+      model: configurationDraft.model || "default",
+      reasoning: configurationDraft.reasoning || "default",
+      permissions: configurationDraft.permissions || "default",
+      fastMode: configurationDraft.fastMode == null ? "default" : configurationDraft.fastMode,
+    }) });
+    if (!response.ok) {
+      const failure = await response.json().catch(() => ({}));
+      const fields = { model, reasoning, permissions, fastMode };
+      for (const [name, message] of Object.entries(failure.fieldErrors || {})) {
+        const field = fields[name];
+        const fieldError = new Map([[model, modelError], [reasoning, reasoningError], [permissions, permissionsError], [fastMode, fastModeError]]).get(field);
+        if (field && fieldError) { field.setAttribute("aria-invalid", "true"); fieldError.textContent = message; }
+      }
+      throw configurationFailure(failure.error || "Configuration could not be applied. Try again.");
+    }
+    const resolved = await response.json();
+    appliedConfiguration = { ...configurationDraft, configurationRevision: resolved.configurationRevision };
     if (state.threadId) persistedThreadConfiguration = false;
     saveAppliedConfiguration();
     ready = true;
@@ -679,9 +726,14 @@ newThread.addEventListener("click", () => {
 showStatus.addEventListener("click", async () => {
   if (!ready || activeTurn) return;
   setStatus("Loading status…");
-  try { info = await fetchInfo(appliedConfiguration.token); }
+  let statusInfo;
+  try {
+    const response = await fetch("/info", { headers: authorization() });
+    if (!response.ok) throw configurationFailure("Status is unavailable. Try again.");
+    statusInfo = await response.json();
+  }
   catch (error) { setStatus(error.message); return; }
-  const limits = info.rateLimits || {};
+  const limits = statusInfo.rateLimits || {};
   setStatus([
     `Thread: ${state.threadId || "new"}`,
     `Model: ${appliedConfiguration.model || "default"}`,
@@ -712,6 +764,8 @@ composer.addEventListener("submit", async (event) => {
       model: persistedThreadConfiguration ? undefined : turnConfiguration.model || undefined,
       reasoning: persistedThreadConfiguration ? undefined : turnConfiguration.reasoning || undefined,
       permissions: persistedThreadConfiguration ? undefined : turnConfiguration.permissions || undefined,
+      fastMode: persistedThreadConfiguration ? undefined : turnConfiguration.fastMode,
+      configurationRevision: persistedThreadConfiguration ? undefined : turnConfiguration.configurationRevision,
     },
   };
   followThread = true;

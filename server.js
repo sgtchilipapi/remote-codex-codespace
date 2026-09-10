@@ -1,7 +1,7 @@
 const express = require("express");
 const { EventEmitter } = require("node:events");
 const { spawn } = require("node:child_process");
-const { randomUUID } = require("node:crypto");
+const { createHash, randomUUID } = require("node:crypto");
 const { StringDecoder } = require("node:string_decoder");
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -45,14 +45,67 @@ function itemText(item) { if (typeof item.text === "string") return item.text; i
 function normalizeItems(turns, anchorId) { const output = []; for (const turn of [...turns].reverse()) for (const item of turn.items || []) { if (!item.id || item.id === anchorId) continue; const type = String(item.type || "").toLowerCase(); let role; if (["usermessage", "user_message"].includes(type)) role = "user"; else if (["agentmessage", "agent_message", "error"].includes(type)) role = "assistant"; else continue; const text = itemText(item); if (text) output.push({ id: item.id, role, text: type === "error" ? `Error: ${text}` : text }); } return output; }
 function validateCursor(value, required = false) { if ((required && !value) || (value != null && (typeof value !== "string" || !value || Buffer.byteLength(value) > 4096 || /[\u0000-\u001f\u007f]/.test(value)))) throw new RelayError(400, "Invalid cursor"); }
 
+const PERMISSIONS = [{ id: "read-only", name: "read only" }, { id: "workspace-write", name: "workspace write" }];
+function configurationModel(item) {
+  return {
+    id: item.id,
+    name: item.displayName,
+    isDefault: Boolean(item.isDefault),
+    reasoning: (item.supportedReasoningEfforts || []).map(({ reasoningEffort }) => reasoningEffort),
+    defaultReasoning: item.defaultReasoningEffort || null,
+    serviceTiers: (item.serviceTiers || []).map(({ id, name }) => ({ id, name })),
+    defaultServiceTier: item.defaultServiceTier || null,
+  };
+}
+async function readConfiguration(codex) {
+  const [catalog, configured] = await Promise.all([
+    codex.request("model/list", { limit: 100 }),
+    codex.request("config/read", {}),
+  ]);
+  const models = (catalog.data || []).filter((item) => !item.hidden).map(configurationModel);
+  const config = configured.config || {};
+  const defaultModel = models.find((item) => item.id === config.model) || models.find((item) => item.isDefault);
+  return {
+    models,
+    permissions: PERMISSIONS,
+    defaults: {
+      model: defaultModel?.id || null,
+      reasoning: defaultModel?.reasoning.includes(config.model_reasoning_effort) ? config.model_reasoning_effort : defaultModel?.defaultReasoning || null,
+      permissions: PERMISSIONS.some(({ id }) => id === config.sandbox_mode) ? config.sandbox_mode : null,
+      fastMode: config.service_tier === "priority" && Boolean(defaultModel?.serviceTiers.some(({ id }) => id === "priority")),
+    },
+  };
+}
+
 function createRelay({ appServer, env = process.env, turnRetentionMs = TURN_RETENTION_MS, maxBufferedBytes = MAX_BUFFERED_BYTES, maxSubscribersPerTurn = 8, maxRetainedTurns = 100 } = {}) {
   if (!Number.isSafeInteger(maxBufferedBytes) || maxBufferedBytes < CONTROL_EVENT_RESERVE_BYTES) throw new Error(`maxBufferedBytes must be at least ${CONTROL_EVENT_RESERVE_BYTES}`);
   if (!Number.isSafeInteger(maxSubscribersPerTurn) || maxSubscribersPerTurn < 1) throw new Error("maxSubscribersPerTurn must be positive");
   if (!Number.isSafeInteger(maxRetainedTurns) || maxRetainedTurns < 1) throw new Error("maxRetainedTurns must be positive");
-  const app = express(); const workdir = env.CODESPACE_WORKDIR || "/workspaces/remote-codex-codespace"; const run = createRun(env); const codex = appServer || new AppServerConnection({ run }); const turns = new Map(); app.locals.appServer = codex;
+  const app = express(); const workdir = env.CODESPACE_WORKDIR || "/workspaces/remote-codex-codespace"; const run = createRun(env); const codex = appServer || new AppServerConnection({ run }); const turns = new Map(); let currentConfigurationRevision = null; let currentResolvedConfiguration = null; app.locals.appServer = codex;
   app.use(express.json()); app.use(express.static("public"));
   const authorize = (req, res, next) => { if (!env.API_TOKEN || req.get("authorization") !== `Bearer ${env.API_TOKEN}`) return res.status(401).json({ error: "Unauthorized" }); next(); };
   const route = (handler) => async (req, res) => { try { await handler(req, res); } catch (error) { const status = error.status || 502; const message = [400, 404, 409, 429].includes(status) ? error.message : status === 503 ? "Relay capacity unavailable" : status === 504 ? "Codex timed out" : "Codex unavailable"; if (!res.headersSent) res.status(status).json({ error: message }); else res.end(`${JSON.stringify({ type: "error", message })}\n`); } };
+  app.get("/configuration", authorize, route(async (_req, res) => res.json(await readConfiguration(codex))));
+  app.post("/configuration/resolve", authorize, route(async (req, res) => {
+    const availability = await readConfiguration(codex);
+    const draft = req.body || {};
+    const requestedModel = draft.model === "default" ? availability.defaults.model : draft.model;
+    const selected = availability.models.find(({ id }) => id === requestedModel);
+    const fieldErrors = {};
+    if (!selected) fieldErrors.model = "Model is not available.";
+    const resolvedReasoning = draft.reasoning === "default" ? (selected?.defaultReasoning || availability.defaults.reasoning) : draft.reasoning;
+    if (draft.reasoning !== "default" && (!selected || !selected.reasoning.includes(draft.reasoning))) fieldErrors.reasoning = "Reasoning effort is not supported by the selected model.";
+    const resolvedPermissions = draft.permissions === "default" ? availability.defaults.permissions : draft.permissions;
+    if (draft.permissions !== "default" && !PERMISSIONS.some(({ id }) => id === draft.permissions)) fieldErrors.permissions = "Permissions choice is not supported.";
+    const resolvedFastMode = draft.fastMode === "default" ? availability.defaults.fastMode : draft.fastMode;
+    if ((typeof draft.fastMode !== "boolean" && draft.fastMode !== "default") || (resolvedFastMode && !selected?.serviceTiers.some(({ id }) => id === "priority"))) fieldErrors.fastMode = "Fast mode is not supported by the selected model.";
+    if (Object.keys(fieldErrors).length) return res.status(400).json({ error: "Configuration is unsupported", fieldErrors });
+    const resolved = { model: selected.id, reasoning: resolvedReasoning, permissions: resolvedPermissions, fastMode: resolvedFastMode, serviceTier: resolvedFastMode ? "priority" : selected.defaultServiceTier };
+    const configurationRevision = createHash("sha256").update(JSON.stringify({ availability, resolved })).digest("hex");
+    currentConfigurationRevision = configurationRevision;
+    currentResolvedConfiguration = resolved;
+    res.json({ configuration: resolved, configurationRevision });
+  }));
   app.get("/info", authorize, route(async (_req, res) => { const [models, limits] = await Promise.all([codex.request("model/list", { limit: 100 }), codex.request("account/rateLimits/read", {})]); res.json({ models: models.data.map((item) => ({ id: item.id, name: item.displayName, isDefault: item.isDefault, defaultReasoning: item.defaultReasoningEffort, reasoning: item.supportedReasoningEfforts.map(({ reasoningEffort }) => reasoningEffort) })), rateLimits: limits.rateLimits }); }));
   app.get("/threads", authorize, route(async (req, res) => { validateCursor(req.query.cursor); if (req.query.currentThreadId && !UUID.test(req.query.currentThreadId)) throw new RelayError(400, "Invalid Thread ID"); const params = { archived: false, cwd: workdir, limit: 20, sortDirection: "desc", sortKey: "recency_at" }; if (req.query.cursor) params.cursor = req.query.cursor; const result = await codex.request("thread/list", params); res.json({ threads: result.data.filter((thread) => eligible(thread, workdir)).map((thread) => publicThread(thread, req.query.currentThreadId)), nextCursor: result.nextCursor || null }); }));
   async function readEligible(threadId) { const result = await codex.request("thread/read", { threadId, includeTurns: false }); if (!eligible(result.thread, workdir)) throw new RelayError(404, "Thread not found"); return result.thread; }
@@ -93,20 +146,24 @@ function createRelay({ appServer, env = process.env, turnRetentionMs = TURN_RETE
   async function startOwnedTurn(turn, request) {
     try {
       if (request.threadId) { await codex.request("thread/resume", { threadId: request.threadId, excludeTurns: true }); turn.threadId = request.threadId; }
-      else { const params = { cwd: workdir }; if (request.model) params.model = request.model; if (request.reasoning) params.effort = request.reasoning; if (request.permissions) params.sandbox = request.permissions; turn.threadId = (await codex.request("thread/start", params)).thread.id; }
+      else { const params = { cwd: workdir }; if (request.model) params.model = request.model; if (request.reasoning && !request.configurationRevision) params.effort = request.reasoning; if (request.permissions) params.sandbox = request.permissions; turn.threadId = (await codex.request("thread/start", params)).thread.id; }
       publishTurnEvent(turn, { type: "thread.started", thread_id: turn.threadId });
       const params = { threadId: turn.threadId, input: [{ type: "text", text: request.prompt }] }; if (request.threadId && request.model) params.model = request.model; if (request.threadId && request.reasoning) params.effort = request.reasoning; if (request.threadId && request.permissions) params.permissions = request.permissions;
+      if (!request.threadId && request.configurationRevision && request.reasoning) params.effort = request.reasoning;
+      if (request.fastMode) params.serviceTier = "priority";
       turn.codexTurnId = (await codex.request("turn/start", params)).turn.id;
       if (turn.status !== "running") { codex.request("turn/interrupt", { threadId: turn.threadId, turnId: turn.codexTurnId }).catch(() => {}); return; }
       for (const notification of turn.pendingNotifications.splice(0)) turn.processNotification(notification);
     } catch { failTurn(turn, "Codex unavailable"); }
   }
   app.post("/turn", authorize, route(async (req, res) => {
-    const { turnId: requestedId, prompt, threadId, model, reasoning, permissions } = req.body;
+    const { turnId: requestedId, prompt, threadId, model, reasoning, permissions, fastMode = false, configurationRevision } = req.body;
     if (typeof prompt !== "string" || !prompt.trim()) throw new RelayError(400, "prompt is required");
     if (threadId && !UUID.test(threadId)) throw new RelayError(400, "threadId is invalid");
     if (requestedId && !UUID.test(requestedId)) throw new RelayError(400, "turnId is invalid");
-    const id = requestedId || randomUUID(); const request = { prompt, threadId, model, reasoning, permissions }; const requestKey = JSON.stringify(request);
+    if (configurationRevision && configurationRevision !== currentConfigurationRevision) throw new RelayError(409, "Configuration revision is obsolete");
+    if (fastMode && currentResolvedConfiguration?.serviceTier !== "priority") throw new RelayError(400, "Fast mode is unsupported");
+    const id = requestedId || randomUUID(); const request = { prompt, threadId, model, reasoning, permissions, fastMode, configurationRevision }; const requestKey = JSON.stringify(request);
     const existing = turns.get(id); if (existing) { if (existing.requestKey !== requestKey) throw new RelayError(409, "turnId already belongs to a different Turn"); return res.status(202).json({ turnId: id, eventsUrl: `/turn/${id}/events` }); }
     if (hasActiveTurn()) throw new RelayError(409, "A Turn is active"); evictCompletedTurns();
     const turn = { id, requestKey, status: "running", threadId: null, codexTurnId: null, events: [], subscribers: new Set(), nextSequence: 1, bufferedBytes: 0, pendingNotifications: [], pendingNotificationBytes: 0 };

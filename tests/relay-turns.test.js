@@ -64,6 +64,71 @@ test("Settings authentication loads live Codex availability without exposing it 
   assert.deepEqual(appServer.calls.map(({ method }) => method), ["model/list", "account/rateLimits/read"]);
 });
 
+test("Configuration projects live model, reasoning, Fast, permissions, and Codex defaults", async (t) => {
+  const appServer = fakeAppServer();
+  appServer.request = async (method, params) => {
+    appServer.calls.push({ method, params });
+    if (method === "model/list") return { data: [
+      { id: "codex-1", displayName: "Codex 1", isDefault: true, hidden: false, defaultReasoningEffort: "medium", supportedReasoningEfforts: [{ reasoningEffort: "low" }, { reasoningEffort: "medium" }], serviceTiers: [{ id: "priority", name: "Fast" }], defaultServiceTier: "flex" },
+      { id: "hidden", displayName: "Hidden", hidden: true, supportedReasoningEfforts: [] },
+    ] };
+    if (method === "config/read") return { config: { model: "codex-1", model_reasoning_effort: "medium", sandbox_mode: "workspace-write", service_tier: "flex" } };
+    return {};
+  };
+  const relay = await serve(appServer); t.after(relay.close);
+
+  assert.equal((await fetch(`${relay.base}/configuration`)).status, 401);
+  const response = await fetch(`${relay.base}/configuration`, authorized());
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    models: [{ id: "codex-1", name: "Codex 1", isDefault: true, reasoning: ["low", "medium"], defaultReasoning: "medium", serviceTiers: [{ id: "priority", name: "Fast" }], defaultServiceTier: "flex" }],
+    permissions: [{ id: "read-only", name: "read only" }, { id: "workspace-write", name: "workspace write" }],
+    defaults: { model: "codex-1", reasoning: "medium", permissions: "workspace-write", fastMode: false },
+  });
+  assert.deepEqual(appServer.calls.map(({ method }) => method), ["model/list", "config/read"]);
+});
+
+test("Configuration resolution validates a whole draft with stable field errors", async (t) => {
+  const appServer = fakeAppServer();
+  appServer.request = async (method, params) => {
+    appServer.calls.push({ method, params });
+    if (method === "model/list") return { data: [{ id: "codex-mini", displayName: "Mini", isDefault: true, defaultReasoningEffort: "low", supportedReasoningEfforts: [{ reasoningEffort: "low" }], serviceTiers: [], defaultServiceTier: null }] };
+    if (method === "config/read") return { config: { model: "codex-mini", model_reasoning_effort: "low", sandbox_mode: "read-only", service_tier: null } };
+    return {};
+  };
+  const relay = await serve(appServer); t.after(relay.close);
+  const response = await fetch(`${relay.base}/configuration/resolve`, authorized({
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: "codex-mini", reasoning: "high", permissions: "dangerous", fastMode: true }),
+  }));
+
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), { error: "Configuration is unsupported", fieldErrors: {
+    reasoning: "Reasoning effort is not supported by the selected model.",
+    permissions: "Permissions choice is not supported.",
+    fastMode: "Fast mode is not supported by the selected model.",
+  } });
+});
+
+test("a resolved Configuration carries Fast mode into the first Turn exactly once", async (t) => {
+  const appServer = fakeAppServer();
+  const originalRequest = appServer.request;
+  appServer.request = async (method, params) => {
+    if (method === "model/list") return { data: [{ id: "codex-1", displayName: "Codex 1", isDefault: true, defaultReasoningEffort: "medium", supportedReasoningEfforts: [{ reasoningEffort: "high" }], serviceTiers: [{ id: "priority", name: "Fast" }] }] };
+    if (method === "config/read") return { config: { model: "codex-1", model_reasoning_effort: "high", sandbox_mode: "read-only" } };
+    return originalRequest(method, params);
+  };
+  const relay = await serve(appServer); t.after(relay.close);
+  const resolved = await fetch(`${relay.base}/configuration/resolve`, authorized({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: "codex-1", reasoning: "high", permissions: "read-only", fastMode: true }) }));
+  const { configurationRevision } = await resolved.json();
+  const created = await start(relay.base, { turnId: relayTurnId, prompt: "Go fast", model: "codex-1", reasoning: "high", permissions: "read-only", fastMode: true, configurationRevision });
+  assert.equal(created.status, 202);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(appServer.calls.find(({ method }) => method === "thread/start").params, { cwd: "/repo", model: "codex-1", sandbox: "read-only" });
+  assert.deepEqual(appServer.calls.find(({ method }) => method === "turn/start").params, { threadId, input: [{ type: "text", text: "Go fast" }], effort: "high", serviceTier: "priority" });
+});
+
 test("a Turn survives disconnect and replays every missed event once", async (t) => {
   const appServer = fakeAppServer();
   const relay = await serve(appServer); t.after(relay.close);
