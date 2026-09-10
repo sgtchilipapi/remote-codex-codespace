@@ -33,6 +33,7 @@ An implementation-ready specification that resolves every finding in [`responsiv
 - [Add capability-driven Configuration with Fast mode](tickets/09-add-capability-driven-configuration.md): Project live Codex capabilities into a transactional Configuration draft, validate one atomic revision, and carry advertised Fast mode into the first Turn.
 - [Make New a revision-safe local Thread entry](tickets/10-make-new-revision-safe-local-entry.md): Persist and announce one concrete local Pre-Turn snapshot, bind it to the first Turn, and safely re-resolve obsolete revisions before Codex starts.
 - [Resume Eligible Threads with canonical effective state](tickets/11-resume-eligible-threads-with-effective-state.md): Filter listing and revalidation to allowed sources, and atomically install canonical ID-bearing history with only Codex-reported effective settings.
+- [Render item-owned assistant and Activity bubbles](tickets/12-render-item-owned-assistant-and-activity-bubbles.md): Preserve item identity across live and replayed events, render immutable per-item assistant and error bubbles, and expose only normalized transient Activity categories while retaining reader position.
 
 ## Not yet specified
 
@@ -48,7 +49,6 @@ None.
 
 ## Open child tickets
 
-1. [Render item-owned assistant and Activity bubbles](tickets/12-render-item-owned-assistant-and-activity-bubbles.md)
-2. [Rehydrate persisted Thread and local-New views safely](tickets/13-rehydrate-persisted-thread-views.md)
-3. [Expose and present effective Status end to end](tickets/14-expose-and-present-effective-status.md)
-4. [Retire the compatibility facade and enforce the release matrix](tickets/15-retire-info-and-enforce-release-matrix.md)
+1. [Rehydrate persisted Thread and local-New views safely](tickets/13-rehydrate-persisted-thread-views.md)
+2. [Expose and present effective Status end to end](tickets/14-expose-and-present-effective-status.md)
+3. [Retire the compatibility facade and enforce the release matrix](tickets/15-retire-info-and-enforce-release-matrix.md)

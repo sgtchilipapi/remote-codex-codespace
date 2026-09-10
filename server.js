@@ -43,7 +43,19 @@ function recognizable(thread) { return String(thread.name || thread.preview || "
 function eligible(thread, workdir) { return thread && thread.cwd === workdir && !thread.archived && ELIGIBLE_SOURCES.has(sourceKind(thread)) && recognizable(thread); }
 function publicThread(thread, currentThreadId) { const preview = String(thread.preview || "").trim(); return { id: thread.id, title: String(thread.name || preview).trim(), preview, lastActive: thread.recencyAt ?? thread.updatedAt ?? thread.createdAt, model: thread.model || "", current: thread.id === currentThreadId }; }
 function itemText(item) { if (typeof item.text === "string") return item.text; if (typeof item.message === "string") return item.message; if (Array.isArray(item.content)) return item.content.filter((part) => ["text", "input_text", "output_text"].includes(part.type)).map((part) => part.text || "").join(""); return ""; }
-function normalizeItems(turns, anchorId) { const output = []; for (const turn of [...turns].reverse()) for (const item of turn.items || []) { if (!item.id || item.id === anchorId) continue; const type = String(item.type || "").toLowerCase(); let role; if (["usermessage", "user_message"].includes(type)) role = "user"; else if (["agentmessage", "agent_message", "error"].includes(type)) role = "assistant"; else continue; const text = itemText(item); if (text) output.push({ id: item.id, role, text: type === "error" ? `Error: ${text}` : text }); } return output; }
+function activityCategory(type) {
+  const normalized = String(type || "").replace(/[^a-z]/gi, "").toLowerCase();
+  if (["reasoning", "plan", "planning"].includes(normalized)) return "Thinking";
+  if (["commandexecution", "command", "terminal"].includes(normalized)) return "Running";
+  if (["filechange", "filechanges", "fileedit"].includes(normalized)) return "Editing";
+  if (["websearch", "web", "mcptoolcall", "dynamictoolcall"].includes(normalized)) return "Researching";
+  if (["collaboration", "collaborationtoolcall", "subagent", "subagenttoolcall"].includes(normalized)) return "Delegating";
+  if (["imageview", "viewimage"].includes(normalized)) return "Inspecting image";
+  if (["imagegeneration", "imagegen"].includes(normalized)) return "Generating image";
+  if (["sleep", "wait", "waiting"].includes(normalized)) return "Waiting";
+  return "Working";
+}
+function normalizeItems(turns, anchorId) { const output = []; for (const turn of [...turns].reverse()) for (const item of turn.items || []) { if (!item.id || item.id === anchorId) continue; const type = String(item.type || "").toLowerCase(); let role; if (["usermessage", "user_message"].includes(type)) role = "user"; else if (["agentmessage", "agent_message", "error"].includes(type)) role = "assistant"; else continue; const text = itemText(item); if (text) output.push({ id: item.id, role, text: type === "error" ? `Error: ${text}` : text, ...(type === "error" ? { error: true } : {}) }); } return output; }
 function effectiveConfiguration(resumed) {
   const serviceTier = resumed.serviceTier ?? null;
   return {
@@ -155,7 +167,8 @@ function createRelay({ appServer, env = process.env, turnRetentionMs = TURN_RETE
   }
   function failTurn(turn, message, interrupt = false) {
     if (turn.status !== "running") return;
-    appendTurnEvent(turn, { type: "error", message: String(message).slice(0, 512) }, true);
+    setTurnActivity(turn, null, true);
+    appendTurnEvent(turn, { type: "error", id: `relay:${turn.id}:error`, message: String(message).slice(0, 512) }, true);
     appendTurnEvent(turn, { type: "relay.turn.finished", status: "failed" }, true);
     if (interrupt && turn.threadId) codex.request("turn/interrupt", { threadId: turn.threadId, turnId: turn.codexTurnId }).catch(() => {});
     finishTurn(turn, "failed");
@@ -163,6 +176,12 @@ function createRelay({ appServer, env = process.env, turnRetentionMs = TURN_RETE
   function publishTurnEvent(turn, event) {
     if (turn.status !== "running") return;
     if (!appendTurnEvent(turn, event)) failTurn(turn, "Turn output exceeded the Relay buffer limit", true);
+  }
+  function setTurnActivity(turn, category, control = false) {
+    if (turn.activity === category) return;
+    turn.activity = category;
+    if (control) appendTurnEvent(turn, { type: "activity", category }, true);
+    else publishTurnEvent(turn, { type: "activity", category });
   }
   function evictCompletedTurns() {
     const completed = [...turns.values()].filter((turn) => turn.status !== "running");
@@ -194,8 +213,22 @@ function createRelay({ appServer, env = process.env, turnRetentionMs = TURN_RETE
     const id = requestedId || randomUUID(); const request = { prompt, threadId, ...boundConfiguration, configurationRevision }; const requestKey = JSON.stringify(request);
     const existing = turns.get(id); if (existing) { if (existing.requestKey !== requestKey) throw new RelayError(409, "turnId already belongs to a different Turn"); return res.status(202).json({ turnId: id, eventsUrl: `/turn/${id}/events` }); }
     if (hasActiveTurn()) throw new RelayError(409, "A Turn is active"); evictCompletedTurns();
-    const turn = { id, requestKey, status: "running", threadId: null, codexTurnId: null, events: [], subscribers: new Set(), nextSequence: 1, bufferedBytes: 0, pendingNotifications: [], pendingNotificationBytes: 0 };
-    turn.processNotification = ({ method, params }) => { if (params?.turnId && params.turnId !== turn.codexTurnId) return; if (method === "item/completed" && params.item?.type === "agentMessage") publishTurnEvent(turn, { type: "item.completed", item: { type: "agent_message", text: itemText(params.item) } }); if (method === "item/completed" && params.item?.type === "error") publishTurnEvent(turn, { type: "error", message: itemText(params.item) || "Turn failed" }); if (method === "turn/completed" && params.turn?.id === turn.codexTurnId) { const status = params.turn?.status === "failed" ? "failed" : "completed"; appendTurnEvent(turn, { type: "relay.turn.finished", status }, true); finishTurn(turn, status); } };
+    const turn = { id, requestKey, status: "running", threadId: null, codexTurnId: null, activity: null, events: [], subscribers: new Set(), nextSequence: 1, bufferedBytes: 0, pendingNotifications: [], pendingNotificationBytes: 0 };
+    turn.processNotification = ({ method, params }) => {
+      if (params?.turnId && params.turnId !== turn.codexTurnId) return;
+      if (method === "item/started" && params.item?.type === "agentMessage") setTurnActivity(turn, null);
+      else if (method === "item/started") setTurnActivity(turn, activityCategory(params.item?.type));
+      if (method === "item/agentMessage/delta" && params.itemId) {
+        setTurnActivity(turn, null);
+        publishTurnEvent(turn, { type: "item.delta", item: { id: params.itemId, type: "agent_message", delta: String(params.delta || "") } });
+      }
+      if (method === "item/completed" && params.item?.type === "agentMessage" && params.item.id) {
+        setTurnActivity(turn, null);
+        publishTurnEvent(turn, { type: "item.completed", item: { id: params.item.id, type: "agent_message", text: itemText(params.item) } });
+      }
+      if (method === "item/completed" && params.item?.type === "error" && params.item.id) publishTurnEvent(turn, { type: "item.completed", item: { id: params.item.id, type: "error", text: itemText(params.item) || "Turn failed" } });
+      if (method === "turn/completed" && params.turn?.id === turn.codexTurnId) { const status = params.turn?.status === "failed" ? "failed" : "completed"; setTurnActivity(turn, null, true); appendTurnEvent(turn, { type: "relay.turn.finished", status }, true); finishTurn(turn, status); }
+    };
     turn.onNotification = (notification) => { if (notification.params?.threadId !== turn.threadId) return; if (!turn.codexTurnId) { turn.pendingNotificationBytes += Buffer.byteLength(JSON.stringify(notification)); if (turn.pendingNotificationBytes > maxBufferedBytes - CONTROL_EVENT_RESERVE_BYTES) failTurn(turn, "Turn output exceeded the Relay buffer limit"); else turn.pendingNotifications.push(notification); } else turn.processNotification(notification); };
     turn.onDisconnect = () => failTurn(turn, "Codex unavailable"); codex.on?.("notification", turn.onNotification); codex.on?.("disconnect", turn.onDisconnect); turns.set(id, turn); void startOwnedTurn(turn, request);
     res.status(202).json({ turnId: id, eventsUrl: `/turn/${id}/events` });

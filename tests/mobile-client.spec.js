@@ -64,6 +64,7 @@ async function installStreamingTurn(page) {
         return Response.json({ turnId: window.__turnRequest.turnId, eventsUrl: `/turn/${window.__turnRequest.turnId}/events` }, { status: 202 });
       }
       if (!/\/turn\/[^/]+\/events$/.test(url.pathname)) return originalFetch(input, init);
+      if (window.__rejectTurnRecovery) return Response.json({ error: "Turn not found" }, { status: 404 });
       const stream = new ReadableStream({
         start(controller) {
           window.__pushTurnEvent = (event) => {
@@ -582,20 +583,109 @@ test("a dropped Turn subscription reconnects without replacing accumulated outpu
 
   await page.evaluate(() => {
     window.__pushTurnEvent({ type: "thread.started", thread_id: "abc-123" });
-    window.__pushTurnEvent({ type: "item.completed", item: { type: "agent_message", text: "Already here" } });
+    window.__pushTurnEvent({ type: "item.delta", item: { id: "assistant-1", type: "agent_message", delta: "Already here" } });
   });
   await expect(page.getByText("Already here", { exact: true })).toBeVisible();
   await page.evaluate(() => window.__dropTurn());
   await expect(page.getByRole("status")).toContainText("Reconnecting");
   await page.waitForTimeout(600);
   await page.evaluate(() => {
-    window.__pushTurnEvent({ type: "item.completed", item: { type: "agent_message", text: " and recovered" } });
+    window.__pushTurnEvent({ type: "item.delta", item: { id: "assistant-1", type: "agent_message", delta: " and recovered" } });
+    window.__pushTurnEvent({ type: "item.completed", item: { id: "assistant-1", type: "agent_message", text: "Already here and recovered" } });
     window.__finishTurn();
   });
 
   await expect(page.getByText("Already here and recovered", { exact: true })).toBeVisible();
   await expect(page.getByText(/Error: Load failed/)).toHaveCount(0);
   expect(await page.evaluate(() => JSON.parse(localStorage.relay).activeTurn)).toBeNull();
+});
+
+test("assistant items reconcile deltas and authoritative completion by item ID", async ({ page }) => {
+  await installStreamingTurn(page);
+  await openConfiguredClient(page);
+  await page.getByLabel("Prompt").fill("Explain it");
+  await page.locator("#composer").evaluate((form) => form.requestSubmit());
+  await expect.poll(() => page.evaluate(() => Boolean(window.__pushTurnEvent))).toBe(true);
+
+  await page.evaluate(() => {
+    window.__pushTurnEvent({ type: "item.delta", item: { id: "a1", type: "agent_message", delta: "Dra" } });
+    window.__pushTurnEvent({ type: "item.delta", item: { id: "a1", type: "agent_message", delta: "ft" } });
+    window.__pushTurnEvent({ type: "item.completed", item: { id: "a1", type: "agent_message", text: "First final" } });
+    window.__pushTurnEvent({ type: "item.completed", item: { id: "a1", type: "agent_message", text: "Must not replace final" } });
+    window.__pushTurnEvent({ type: "item.completed", item: { id: "a2", type: "agent_message", text: "Second final" } });
+    window.__pushTurnEvent({ type: "item.delta", item: { id: "empty", type: "agent_message", delta: "Discarded draft" } });
+    window.__pushTurnEvent({ type: "item.completed", item: { id: "empty", type: "agent_message", text: "" } });
+    window.__finishTurn();
+  });
+
+  await expect(page.locator(".message.assistant")).toHaveCount(2);
+  await expect(page.locator(".message.assistant").nth(0)).toHaveText("First final");
+  await expect(page.locator(".message.assistant").nth(1)).toHaveText("Second final");
+  expect(await page.evaluate(() => JSON.parse(localStorage.relay).messages.filter(({ role }) => role === "assistant"))).toEqual([
+    { id: "a1", role: "assistant", text: "First final" },
+    { id: "a2", role: "assistant", text: "Second final" },
+  ]);
+});
+
+test("activity is one accessible transient bubble with reduced-motion decoration", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await installStreamingTurn(page);
+  await openConfiguredClient(page);
+  await page.getByLabel("Prompt").fill("Work");
+  await page.locator("#composer").evaluate((form) => form.requestSubmit());
+  await expect.poll(() => page.evaluate(() => Boolean(window.__pushTurnEvent))).toBe(true);
+
+  await page.evaluate(() => window.__pushTurnEvent({ type: "activity", category: "Thinking" }));
+  const activity = page.locator(".activity");
+  await expect(activity).toHaveCount(1);
+  await expect(activity).toHaveAttribute("aria-label", "Thinking");
+  await expect(activity.locator("[aria-hidden=true]")).toHaveText("…");
+  await page.evaluate(() => window.__pushTurnEvent({ type: "thread.started", thread_id: "abc-123" }));
+  await expect(activity).not.toHaveAttribute("role", "status");
+  await page.evaluate(() => window.__pushTurnEvent({ type: "activity", category: "Running" }));
+  await expect(activity).toHaveCount(1);
+  await expect(activity).toHaveAttribute("role", "status");
+  await expect(activity).toHaveAttribute("aria-label", "Running");
+  await page.evaluate(() => {
+    window.__pushTurnEvent({ type: "activity", category: null });
+    window.__pushTurnEvent({ type: "item.completed", item: { id: "a1", type: "agent_message", text: "Done" } });
+    window.__finishTurn();
+  });
+  await expect(activity).toHaveCount(0);
+  expect(await page.evaluate(() => JSON.parse(localStorage.relay).messages.some(({ role }) => role === "activity"))).toBe(false);
+});
+
+test("a failed Turn keeps interrupted output and a separate replay-safe error", async ({ page }) => {
+  await installStreamingTurn(page);
+  await openConfiguredClient(page);
+  await page.getByLabel("Prompt").fill("Try");
+  await page.locator("#composer").evaluate((form) => form.requestSubmit());
+  await expect.poll(() => page.evaluate(() => Boolean(window.__pushTurnEvent))).toBe(true);
+  await page.evaluate(() => {
+    window.__pushTurnEvent({ type: "item.delta", item: { id: "a1", type: "agent_message", delta: "Partial" } });
+    window.__pushTurnEvent({ type: "error", id: "relay:turn:error", message: "Disconnected" });
+  });
+
+  await expect(page.locator(".message.interrupted")).toContainText("PartialInterrupted");
+  await expect(page.locator(".message.error")).toHaveText("Error: Disconnected");
+  expect(await page.evaluate(() => JSON.parse(localStorage.relay).messages.map(({ text }) => text))).toEqual(["Try", "Error: Disconnected"]);
+});
+
+test("partial output disappears when Turn recovery is unavailable", async ({ page }) => {
+  await installStreamingTurn(page);
+  await openConfiguredClient(page);
+  await page.getByLabel("Prompt").fill("Try");
+  await page.locator("#composer").evaluate((form) => form.requestSubmit());
+  await expect.poll(() => page.evaluate(() => Boolean(window.__pushTurnEvent))).toBe(true);
+  await page.evaluate(() => {
+    window.__pushTurnEvent({ type: "item.delta", item: { id: "a1", type: "agent_message", delta: "Temporary" } });
+    window.__rejectTurnRecovery = true;
+    window.__dropTurn();
+  });
+
+  await expect(page.getByText("Temporary", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("status")).toContainText("Turn recovery unavailable");
+  expect(await page.evaluate(() => JSON.parse(localStorage.relay).messages.map(({ text }) => text))).toEqual(["Try"]);
 });
 
 test("the composer grows to its viewport cap and New resets it", async ({ page }) => {
@@ -680,10 +770,14 @@ test("streaming follows within 80px and preserves a reader who scrolls away", as
   await page.locator("#composer").evaluate((form) => form.requestSubmit());
   await expect.poll(() => page.evaluate(() => Boolean(window.__pushTurnEvent))).toBe(true);
 
-  await page.evaluate(() => window.__pushTurnEvent({
-    type: "item.completed",
-    item: { type: "agent_message", text: "first\n".repeat(30) },
-  }));
+  await page.evaluate(() => window.__pushTurnEvent({ type: "activity", category: "Thinking" }));
+  await expect.poll(() => page.locator("#messages").evaluate((element) =>
+    element.scrollHeight - element.clientHeight - element.scrollTop)).toBeLessThanOrEqual(1);
+  await page.evaluate(() => {
+    window.__pushTurnEvent({ type: "activity", category: null });
+    window.__pushTurnEvent({ type: "item.delta", item: { id: "first", type: "agent_message", delta: "draft" } });
+    window.__pushTurnEvent({ type: "item.completed", item: { id: "first", type: "agent_message", text: "first\n".repeat(30) } });
+  });
   await expect.poll(() => page.locator("#messages").evaluate((element) =>
     element.scrollHeight - element.clientHeight - element.scrollTop)).toBeLessThanOrEqual(1);
 
@@ -692,10 +786,11 @@ test("streaming follows within 80px and preserves a reader who scrolls away", as
     element.dispatchEvent(new Event("scroll"));
     await new Promise((resolve) => requestAnimationFrame(() => resolve()));
   });
-  await page.evaluate(() => window.__pushTurnEvent({
-    type: "item.completed",
-    item: { type: "agent_message", text: "near\n".repeat(10) },
-  }));
+  await page.evaluate(() => {
+    window.__pushTurnEvent({ type: "activity", category: "Running" });
+    window.__pushTurnEvent({ type: "activity", category: null });
+    window.__pushTurnEvent({ type: "item.completed", item: { id: "near", type: "agent_message", text: "near\n".repeat(10) } });
+  });
   await expect.poll(() => page.locator("#messages").evaluate((element) =>
     element.scrollHeight - element.clientHeight - element.scrollTop)).toBeLessThanOrEqual(1);
 
@@ -704,11 +799,13 @@ test("streaming follows within 80px and preserves a reader who scrolls away", as
     element.dispatchEvent(new Event("scroll"));
   });
   const readingPosition = await page.locator("#messages").evaluate((element) => element.scrollTop);
-  await page.evaluate(() => window.__pushTurnEvent({
-    type: "item.completed",
-    item: { type: "agent_message", text: "second\n".repeat(30) },
-  }));
-  await expect(page.locator(".message").last()).toContainText("second");
+  await page.evaluate(() => {
+    window.__pushTurnEvent({ type: "item.delta", item: { id: "second", type: "agent_message", delta: "second\n".repeat(30) } });
+    window.__pushTurnEvent({ type: "item.completed", item: { id: "second", type: "agent_message", text: "second\n".repeat(30) } });
+    window.__pushTurnEvent({ type: "item.completed", item: { id: "error-position", type: "error", text: "Nonfatal" } });
+    window.__pushTurnEvent({ type: "activity", category: "Researching" });
+  });
+  await expect(page.locator('.message[data-item-id="second"]')).toContainText("second");
   await page.waitForTimeout(50);
   expect(await page.locator("#messages").evaluate((element) => element.scrollTop)).toBe(readingPosition);
 
@@ -716,10 +813,10 @@ test("streaming follows within 80px and preserves a reader who scrolls away", as
     element.scrollTop = element.scrollHeight;
     element.dispatchEvent(new Event("scroll"));
   });
-  await page.evaluate(() => window.__pushTurnEvent({
-    type: "item.completed",
-    item: { type: "agent_message", text: "third\n".repeat(30) },
-  }));
+  await page.evaluate(() => {
+    window.__pushTurnEvent({ type: "activity", category: null });
+    window.__pushTurnEvent({ type: "item.completed", item: { id: "third", type: "agent_message", text: "third\n".repeat(30) } });
+  });
   await expect.poll(() => page.locator("#messages").evaluate((element) =>
     element.scrollHeight - element.clientHeight - element.scrollTop)).toBeLessThanOrEqual(1);
   await page.evaluate(() => window.__finishTurn());

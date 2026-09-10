@@ -71,6 +71,7 @@ let followFrame = 0;
 let programmaticFollowPending = false;
 let userScrollIntent = false;
 let readingAnchor = null;
+let lastAnnouncedActivity = null;
 
 function readJson(key, fallback) {
   try { return JSON.parse(localStorage.getItem(key)) || fallback; }
@@ -103,7 +104,13 @@ function readAppliedConfiguration() {
   return migrated;
 }
 
-function saveState() { localStorage.setItem("relay", JSON.stringify(state)); }
+function saveState() {
+  const persisted = state.activeTurn ? state : {
+    ...state,
+    messages: state.messages.filter((message) => !message.interrupted && !message.provisional),
+  };
+  localStorage.setItem("relay", JSON.stringify(persisted));
+}
 function saveAppliedConfiguration() {
   localStorage.setItem("relayConfiguration", JSON.stringify(appliedConfiguration));
 }
@@ -690,12 +697,41 @@ function scheduleFollow() {
 function drawMessages({ forceFollow = false } = {}) {
   const wasFollowing = forceFollow || (followThread && isNearBottom());
   const anchor = wasFollowing ? null : captureReadingAnchor();
-  const nodes = state.messages.map(({ role, text }) => {
+  const existingActivity = messages.querySelector(".activity");
+  const nodes = state.messages.map(({ id, role, text, error, interrupted }) => {
     const node = document.createElement("div");
-    node.className = `message ${role}`;
+    node.className = `message ${role}${error ? " error" : ""}${interrupted ? " interrupted" : ""}`;
+    if (id) node.dataset.itemId = id;
     appendMessageContent(node, role, text);
+    if (interrupted) {
+      const metadata = document.createElement("small");
+      metadata.className = "message-metadata";
+      metadata.textContent = "Interrupted";
+      node.append(metadata);
+    }
     return node;
   });
+  if (state.activeTurn?.activity) {
+    const activity = existingActivity || document.createElement("div");
+    if (!existingActivity) {
+      activity.className = "message assistant activity";
+      const decoration = document.createElement("span");
+      decoration.className = "activity-decoration";
+      decoration.setAttribute("aria-hidden", "true");
+      decoration.textContent = matchMedia("(prefers-reduced-motion: reduce)").matches ? "…" : "···";
+      activity.append(decoration);
+    }
+    const changed = lastAnnouncedActivity !== state.activeTurn.activity;
+    activity.toggleAttribute("role", changed);
+    activity.toggleAttribute("aria-live", changed);
+    if (changed) {
+      activity.setAttribute("role", "status");
+      activity.setAttribute("aria-live", "polite");
+      activity.setAttribute("aria-label", state.activeTurn.activity);
+      lastAnnouncedActivity = state.activeTurn.activity;
+    }
+    nodes.push(activity);
+  } else lastAnnouncedActivity = null;
   messages.replaceChildren(loadOlderHistory, ...nodes);
   loadOlderHistory.hidden = !olderCursor;
   if (wasFollowing) {
@@ -828,12 +864,12 @@ composer.addEventListener("submit", async (event) => {
       return;
     }
   }
-  state.messages.push({ role: "user", text }, { role: "assistant", text: "" });
+  state.messages.push({ id: `local:${crypto.randomUUID()}`, role: "user", text });
   state.activeTurn = {
     id: crypto.randomUUID(),
     stage: "starting",
     lastSequence: 0,
-    messageIndex: state.messages.length - 1,
+    consumedItemIds: [],
     request: {
       prompt: text,
       threadId: state.threadId,
@@ -878,14 +914,44 @@ function applyTurnEvent(turnEvent) {
     state.localNew = false;
     renderPreTurnConfiguration();
   }
-  if (turnEvent.type === "item.completed" && turnEvent.item?.type === "agent_message") {
-    state.messages[turn.messageIndex].text += turnEvent.item.text; setStatus("Codex response updated.");
+  if (turnEvent.type === "activity") turn.activity = typeof turnEvent.category === "string" ? turnEvent.category : null;
+  const item = turnEvent.item;
+  const itemId = item?.id || `legacy:${turnEvent.sequence}`;
+  turn.consumedItemIds ||= [];
+  if (turnEvent.type === "item.delta" && item?.type === "agent_message" && !turn.consumedItemIds.includes(itemId)) {
+    let message = state.messages.find((entry) => entry.id === itemId);
+    if (!message) {
+      message = { id: itemId, role: "assistant", text: "", provisional: true };
+      state.messages.push(message);
+    }
+    message.text += String(item.delta || "");
+    setStatus("Codex response updated.");
   }
-  if (turnEvent.type === "error") turn.error = turnEvent.message;
+  if (turnEvent.type === "item.completed" && item?.type === "agent_message" && !turn.consumedItemIds.includes(itemId)) {
+    let message = state.messages.find((entry) => entry.id === itemId);
+    const text = String(item.text || "");
+    if (!message && text) { message = { id: itemId, role: "assistant", text }; state.messages.push(message); }
+    if (message) {
+      message.text = text;
+      delete message.provisional;
+      delete message.interrupted;
+      if (!message.text) state.messages.splice(state.messages.indexOf(message), 1);
+    }
+    turn.consumedItemIds.push(itemId);
+    setStatus("Codex response updated.");
+  }
+  if (turnEvent.type === "item.completed" && item?.type === "error" && !turn.consumedItemIds.includes(itemId)) {
+    state.messages.push({ id: itemId, role: "assistant", text: `Error: ${String(item.text || "Turn failed")}`, error: true });
+    turn.consumedItemIds.push(itemId);
+  }
+  if (turnEvent.type === "error") {
+    turn.error = turnEvent.message;
+    const errorId = turnEvent.id || `relay:${turn.id}:error`;
+    if (!state.messages.some(({ id }) => id === errorId)) state.messages.push({ id: errorId, role: "assistant", text: `Error: ${turnEvent.message}`, error: true });
+  }
   if (turnEvent.type !== "relay.turn.finished") return false;
   if (turnEvent.status === "failed") {
-    const assistant = state.messages[turn.messageIndex];
-    if (!assistant.text && turn.error) assistant.text = `Error: ${turn.error}`;
+    for (const message of state.messages) if (message.provisional) { message.interrupted = true; delete message.provisional; }
     finishActiveTurn(turn.error ? `Codex failed: ${turn.error}` : "Codex failed");
   } else finishActiveTurn();
   return true;
@@ -932,7 +998,11 @@ async function followActiveTurn() {
           if (done) throw new Error("Turn stream ended before completion");
         }
       } catch (error) {
-        if (error.retryable === false) { finishActiveTurn(`Turn recovery unavailable: ${error.message}`); return; }
+        if (error.retryable === false) {
+          state.messages = state.messages.filter((message) => !message.provisional);
+          finishActiveTurn(`Turn recovery unavailable: ${error.message}`);
+          return;
+        }
         setStatus("Connection lost. Reconnecting…"); saveState(); drawMessages(); await wait(retryDelay); retryDelay = Math.min(retryDelay * 2, 10_000);
       }
     }

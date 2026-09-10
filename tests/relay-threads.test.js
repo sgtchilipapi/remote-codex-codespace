@@ -128,7 +128,7 @@ test("history de-duplicates inclusive anchors and keeps errors safe", async () =
     nextCursor: null,
   } };
   const response = await request(createRelay({ appServer, env: { API_TOKEN: "secret", CODESPACE_WORKDIR: "/repo" } }), `/threads/${uuid}/history?cursor=cursor&anchorId=anchor`);
-  assert.deepEqual(await response.json(), { messages: [{ id: "err", role: "assistant", text: "Error: safe failure" }], olderCursor: null });
+  assert.deepEqual(await response.json(), { messages: [{ id: "err", role: "assistant", text: "Error: safe failure", error: true }], olderCursor: null });
 });
 
 test("an explicit configuration overrides a resumed Thread on its next Turn", async () => {

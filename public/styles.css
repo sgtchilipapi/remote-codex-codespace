@@ -188,6 +188,15 @@ main.settings-open #resume-picker { display: none; }
 .message:first-child { margin-top: 0; }
 .message:last-child { margin-bottom: 0; }
 .message.user { background: var(--user); }
+.message.error { border-inline-start: 3px solid var(--danger); }
+.message-metadata { display: block; margin-top: 6px; color: var(--muted); font-size: .75rem; }
+.activity { color: var(--muted); }
+.activity-decoration { display: inline-block; letter-spacing: .2em; animation: activity-pulse 1.2s ease-in-out infinite; }
+
+@keyframes activity-pulse {
+  0%, 100% { opacity: .35; }
+  50% { opacity: 1; }
+}
 
 .message pre {
   max-width: 100%;
@@ -248,4 +257,5 @@ main.settings-open #resume-picker { display: none; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; }
+  .activity-decoration { animation: none; }
 }

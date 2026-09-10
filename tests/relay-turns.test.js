@@ -177,7 +177,7 @@ test("a Turn survives disconnect and replays every missed event once", async (t)
   assert.deepEqual(await created.json(), { turnId: relayTurnId, eventsUrl: `/turn/${relayTurnId}/events` });
 
   const firstConnection = await fetch(`${relay.base}/turn/${relayTurnId}/events`, authorized());
-  emit(appServer, "item/completed", { item: { type: "agentMessage", text: "first" } });
+  emit(appServer, "item/completed", { item: { id: "assistant-1", type: "agentMessage", text: "first" } });
   const reader = firstConnection.body.getReader();
   const firstBatch = new TextDecoder().decode((await reader.read()).value).trim().split("\n").map(JSON.parse);
   let lastSequence = firstBatch.at(-1).sequence;
@@ -187,7 +187,7 @@ test("a Turn survives disconnect and replays every missed event once", async (t)
   }
   await reader.cancel();
 
-  emit(appServer, "item/completed", { item: { type: "agentMessage", text: " second" } });
+  emit(appServer, "item/completed", { item: { id: "assistant-2", type: "agentMessage", text: " second" } });
   emit(appServer, "turn/completed", { turn: { id: "codex-turn" } });
   const replay = await fetch(`${relay.base}/turn/${relayTurnId}/events?after=${lastSequence}`, authorized());
   const events = (await replay.text()).trim().split("\n").map(JSON.parse);
@@ -196,6 +196,69 @@ test("a Turn survives disconnect and replays every missed event once", async (t)
     { sequence: lastSequence + 2, type: "relay.turn.finished", status: "completed", text: undefined },
   ]);
   assert.equal(appServer.calls.some(({ method }) => method === "turn/interrupt"), false);
+});
+
+test("a Turn carries item identity through deltas, completions, and Codex errors", async (t) => {
+  const appServer = fakeAppServer();
+  const relay = await serve(appServer); t.after(relay.close);
+  await start(relay.base);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  emit(appServer, "item/agentMessage/delta", { itemId: "assistant-1", delta: "Draft" });
+  emit(appServer, "item/completed", { item: { id: "assistant-1", type: "agentMessage", text: "Final" } });
+  emit(appServer, "item/completed", { item: { id: "error-1", type: "error", message: "Tool failed" } });
+  emit(appServer, "turn/completed", { turn: { id: "codex-turn", status: "failed" } });
+
+  const response = await fetch(`${relay.base}/turn/${relayTurnId}/events`, authorized());
+  const events = (await response.text()).trim().split("\n").map(JSON.parse);
+  assert.deepEqual(events.slice(1).map(({ sequence: _sequence, ...event }) => event), [
+    { type: "item.delta", item: { id: "assistant-1", type: "agent_message", delta: "Draft" } },
+    { type: "item.completed", item: { id: "assistant-1", type: "agent_message", text: "Final" } },
+    { type: "item.completed", item: { id: "error-1", type: "error", text: "Tool failed" } },
+    { type: "relay.turn.finished", status: "failed" },
+  ]);
+});
+
+test("activity is normalized, deduplicated, and cleared around assistant output", async (t) => {
+  const appServer = fakeAppServer();
+  const relay = await serve(appServer); t.after(relay.close);
+  await start(relay.base);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  emit(appServer, "item/started", { item: { id: "reason-1", type: "reasoning", summary: "private" } });
+  emit(appServer, "item/started", { item: { id: "plan-1", type: "plan", text: "also private" } });
+  emit(appServer, "item/started", { item: { id: "assistant-1", type: "agentMessage" } });
+  emit(appServer, "item/agentMessage/delta", { itemId: "assistant-1", delta: "Hello" });
+  emit(appServer, "item/started", { item: { id: "command-1", type: "commandExecution", command: "secret" } });
+  emit(appServer, "turn/completed", { turn: { id: "codex-turn" } });
+
+  const response = await fetch(`${relay.base}/turn/${relayTurnId}/events`, authorized());
+  const events = (await response.text()).trim().split("\n").map(JSON.parse);
+  assert.deepEqual(events.slice(1).map(({ sequence: _sequence, ...event }) => event), [
+    { type: "activity", category: "Thinking" },
+    { type: "activity", category: null },
+    { type: "item.delta", item: { id: "assistant-1", type: "agent_message", delta: "Hello" } },
+    { type: "activity", category: "Running" },
+    { type: "activity", category: null },
+    { type: "relay.turn.finished", status: "completed" },
+  ]);
+  assert.equal(JSON.stringify(events).includes("private"), false);
+  assert.equal(JSON.stringify(events).includes("secret"), false);
+});
+
+test("every structured activity kind maps to a stable public category", async (t) => {
+  const appServer = fakeAppServer();
+  const relay = await serve(appServer); t.after(relay.close);
+  await start(relay.base);
+  await new Promise((resolve) => setImmediate(resolve));
+  for (const type of ["reasoning", "commandExecution", "fileChange", "mcpToolCall", "subagentToolCall", "imageView", "imageGeneration", "sleep", "futureTool"]) {
+    emit(appServer, "item/started", { item: { id: type, type } });
+  }
+  emit(appServer, "turn/completed", { turn: { id: "codex-turn" } });
+
+  const response = await fetch(`${relay.base}/turn/${relayTurnId}/events`, authorized());
+  const categories = (await response.text()).trim().split("\n").map(JSON.parse).filter(({ type }) => type === "activity").map(({ category }) => category);
+  assert.deepEqual(categories, ["Thinking", "Running", "Editing", "Researching", "Delegating", "Inspecting image", "Generating image", "Waiting", "Working", null]);
 });
 
 test("retrying creation with the same ID starts the prompt only once", async (t) => {
@@ -225,12 +288,12 @@ test("buffer overflow interrupts Codex and leaves a safe terminal replay", async
   const appServer = fakeAppServer();
   const relay = await serve(appServer, { maxBufferedBytes: 4096 }); t.after(relay.close);
   await start(relay.base);
-  emit(appServer, "item/completed", { item: { type: "agentMessage", text: "x".repeat(4096) } });
+  emit(appServer, "item/completed", { item: { id: "assistant-large", type: "agentMessage", text: "x".repeat(4096) } });
   await new Promise((resolve) => setImmediate(resolve));
   const replay = await fetch(`${relay.base}/turn/${relayTurnId}/events`, authorized());
   assert.deepEqual((await replay.text()).trim().split("\n").map(JSON.parse), [
     { type: "thread.started", thread_id: threadId, sequence: 1 },
-    { type: "error", message: "Turn output exceeded the Relay buffer limit", sequence: 2 },
+    { type: "error", id: `relay:${relayTurnId}:error`, message: "Turn output exceeded the Relay buffer limit", sequence: 2 },
     { type: "relay.turn.finished", status: "failed", sequence: 3 },
   ]);
   assert.equal(appServer.calls.some(({ method }) => method === "turn/interrupt"), true);
@@ -244,7 +307,7 @@ test("app-server failure terminates the Turn and releases concurrency", async (t
   let replay = await fetch(`${relay.base}/turn/${relayTurnId}/events`, authorized());
   assert.deepEqual((await replay.text()).trim().split("\n").map(JSON.parse), [
     { type: "thread.started", thread_id: threadId, sequence: 1 },
-    { type: "error", message: "Codex unavailable", sequence: 2 },
+    { type: "error", id: `relay:${relayTurnId}:error`, message: "Codex unavailable", sequence: 2 },
     { type: "relay.turn.finished", status: "failed", sequence: 3 },
   ]);
   assert.equal((await start(relay.base, { turnId: "22222222-2222-4222-8222-222222222222", prompt: "Retry" })).status, 202);
@@ -315,7 +378,7 @@ test("a delayed completion from another Turn cannot finish a starting Turn", asy
   await new Promise((resolve) => setImmediate(resolve));
   emit(appServer, "turn/completed", { turn: { id: "previous-turn" } });
   resolveStart({ turn: { id: "codex-turn" } });
-  emit(appServer, "item/completed", { turnId: "codex-turn", item: { type: "agentMessage", text: "actual output" } });
+  emit(appServer, "item/completed", { turnId: "codex-turn", item: { id: "assistant-1", type: "agentMessage", text: "actual output" } });
   emit(appServer, "turn/completed", { turn: { id: "codex-turn" } });
 
   const replay = await fetch(`${relay.base}/turn/${relayTurnId}/events`, authorized());
