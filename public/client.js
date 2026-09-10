@@ -44,6 +44,7 @@ let checking = false;
 let activeTurn = false;
 let hydrating = false;
 let resumeCursor = null;
+let retryThreadPage = false;
 let olderCursor = null;
 let persistedThreadConfiguration = Boolean(state.threadId);
 let followThread = true;
@@ -137,6 +138,7 @@ function renderThreadRows(rows, append = false) {
 }
 
 async function loadThreads(append = false) {
+  retryThreadPage = append;
   hydrating = true; setThreadControls(); resumeStatus.textContent = append ? "Loading more Threads…" : "Loading Threads…"; resumeError.hidden = true;
   try {
     const query = new URLSearchParams(); if (append && resumeCursor) query.set("cursor", resumeCursor); if (state.threadId) query.set("currentThreadId", state.threadId);
@@ -159,7 +161,7 @@ async function selectThread(id, row) {
 
 resumeThread.addEventListener("click", () => { if (!ready || checking || activeTurn || hydrating) return; setResumeOpen(true); loadThreads(); });
 cancelResume.addEventListener("click", () => { if (!hydrating) setResumeOpen(false); });
-loadMoreThreads.addEventListener("click", () => loadThreads(loadMoreThreads.dataset.retry !== "true"));
+loadMoreThreads.addEventListener("click", () => loadThreads(loadMoreThreads.dataset.retry === "true" ? retryThreadPage : true));
 
 function setConfigurationBusy(busy) {
   checking = busy;
