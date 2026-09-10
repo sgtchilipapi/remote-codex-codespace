@@ -272,6 +272,36 @@ test("app-server framing preserves UTF-8 split across stdout chunks", async () =
   assert.equal((await received).params.item.text, "hello 👋");
 });
 
+test("an app-server initialization timeout is discarded so Settings can reconnect", async (t) => {
+  let runs = 0;
+  const run = () => {
+    const attempt = ++runs;
+    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stdin = new PassThrough();
+    child.kill = () => setTimeout(() => child.emit("close", 0), attempt === 1 ? 5 : 0);
+    if (attempt > 1) child.stdin.on("data", (chunk) => {
+      const message = JSON.parse(chunk.toString());
+      if (message.id == null) return;
+      let result = {};
+      if (message.method === "model/list") result = { data: [{ id: "codex-1", displayName: "Codex 1", isDefault: true, defaultReasoningEffort: "medium", supportedReasoningEfforts: [{ reasoningEffort: "medium" }] }] };
+      if (message.method === "config/read") result = { config: { model: "codex-1", model_reasoning_effort: "medium", sandbox_mode: "workspace-write" } };
+      setTimeout(() => child.stdout.write(`${JSON.stringify({ id: message.id, result })}\n`), message.method === "initialize" ? 0 : 10);
+    });
+    return child;
+  };
+  const connection = new AppServerConnection({ run, timeout: 20 });
+  const relay = await serve(connection); t.after(async () => { connection.close(); await relay.close(); });
+
+  const timedOut = await fetch(`${relay.base}/configuration`, authorized());
+  assert.equal(timedOut.status, 504);
+  assert.deepEqual(await timedOut.json(), { error: "Codex timed out" });
+
+  const retry = await fetch(`${relay.base}/configuration`, authorized());
+  assert.equal(retry.status, 200);
+  assert.equal((await retry.json()).defaults.model, "codex-1");
+  assert.equal(runs, 2);
+  assert.equal(connection.pending.size, 0);
+});
+
 test("a delayed completion from another Turn cannot finish a starting Turn", async (t) => {
   const appServer = fakeAppServer(); let resolveStart;
   appServer.request = async (method, params) => {

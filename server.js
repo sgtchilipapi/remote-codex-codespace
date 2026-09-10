@@ -19,21 +19,21 @@ class AppServerConnection extends EventEmitter {
     if (this.connecting) return this.connecting;
     this.connecting = new Promise((resolve, reject) => {
       const child = this.run("codex app-server --stdio"); this.child = child; const decoder = new StringDecoder("utf8"); let buffer = "";
-      child.stdout.on("data", (chunk) => { buffer += decoder.write(chunk); const lines = buffer.split("\n"); buffer = lines.pop(); for (const line of lines) { if (!line.trim()) continue; try { this.handle(JSON.parse(line)); } catch { this.fail(new Error("Invalid app-server response")); } } });
-      child.on("error", (error) => this.fail(error)); child.on("close", () => this.fail(new Error("Codex app-server unavailable")));
-      const id = this.nextId++; const timer = setTimeout(() => reject(new RelayError(504, "Codex timed out")), this.timeout);
-      this.pending.set(id, { resolve: (result) => { clearTimeout(timer); child.stdin.write(`${JSON.stringify({ method: "initialized" })}\n`); resolve(result); }, reject });
+      child.stdout.on("data", (chunk) => { buffer += decoder.write(chunk); const lines = buffer.split("\n"); buffer = lines.pop(); for (const line of lines) { if (!line.trim()) continue; try { this.handle(JSON.parse(line)); } catch { this.fail(new Error("Invalid app-server response"), child); } } });
+      child.on("error", (error) => this.fail(error, child)); child.on("close", () => this.fail(new Error("Codex app-server unavailable"), child));
+      const id = this.nextId++; const timer = setTimeout(() => { const error = new RelayError(504, "Codex timed out"); this.fail(error, child); child.kill(); }, this.timeout);
+      this.pending.set(id, { resolve: (result) => { clearTimeout(timer); child.stdin.write(`${JSON.stringify({ method: "initialized" })}\n`); resolve(result); }, reject: (error) => { clearTimeout(timer); reject(error); } });
       child.stdin.write(`${JSON.stringify({ id, method: "initialize", params: { clientInfo: { name: "relay", version: "1" } } })}\n`);
     }).finally(() => { this.connecting = null; });
     return this.connecting;
   }
   handle(message) { if (message.id != null) { const pending = this.pending.get(message.id); if (!pending) return; this.pending.delete(message.id); return message.error ? pending.reject(new Error("Codex request failed")) : pending.resolve(message.result); } if (message.method) this.emit("notification", message); }
-  fail(error) { this.child = null; for (const pending of this.pending.values()) pending.reject(error); this.pending.clear(); this.emit("disconnect", error); }
+  fail(error, child = this.child) { if (child && this.child !== child) return; this.child = null; const pending = [...this.pending.values()]; this.pending.clear(); for (const request of pending) request.reject(error); this.emit("disconnect", error); }
   async request(method, params = {}, { timeout = this.timeout } = {}) {
     await this.connect(); if (this.pending.size >= 32) throw new RelayError(503, "Relay capacity unavailable");
     return new Promise((resolve, reject) => { const id = this.nextId++; const timer = setTimeout(() => { this.pending.delete(id); reject(new RelayError(504, "Codex timed out")); }, timeout); this.pending.set(id, { resolve: (value) => { clearTimeout(timer); resolve(value); }, reject: (error) => { clearTimeout(timer); reject(error); } }); this.child.stdin.write(`${JSON.stringify({ id, method, params })}\n`); });
   }
-  close() { this.child?.kill(); this.child = null; }
+  close() { const child = this.child; if (!child) return; this.fail(new Error("Codex app-server unavailable"), child); child.kill(); }
 }
 
 function createRun(env) { return (command) => spawn("gh", ["codespace", "ssh", "-c", env.CODESPACE, "--", command], { env: { ...env, GH_PROMPT_DISABLED: "1" }, stdio: ["pipe", "pipe", "pipe"] }); }
