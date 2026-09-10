@@ -43,6 +43,27 @@ function emit(appServer, method, params = {}) {
   appServer.emit("notification", { method, params: { threadId, ...params } });
 }
 
+test("Settings authentication loads live Codex availability without exposing it to unauthorized callers", async (t) => {
+  const appServer = fakeAppServer();
+  appServer.request = async (method, params) => {
+    appServer.calls.push({ method, params });
+    if (method === "model/list") return { data: [{ id: "codex-1", displayName: "Codex 1", isDefault: true, defaultReasoningEffort: "medium", supportedReasoningEfforts: [{ reasoningEffort: "medium" }] }] };
+    if (method === "account/rateLimits/read") return { rateLimits: { planType: "test" } };
+    return {};
+  };
+  const relay = await serve(appServer); t.after(relay.close);
+
+  assert.equal((await fetch(`${relay.base}/info`)).status, 401);
+  const response = await fetch(`${relay.base}/info`, authorized());
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    models: [{ id: "codex-1", name: "Codex 1", isDefault: true, defaultReasoning: "medium", reasoning: ["medium"] }],
+    rateLimits: { planType: "test" },
+  });
+  assert.deepEqual(appServer.calls.map(({ method }) => method), ["model/list", "account/rateLimits/read"]);
+});
+
 test("a Turn survives disconnect and replays every missed event once", async (t) => {
   const appServer = fakeAppServer();
   const relay = await serve(appServer); t.after(relay.close);

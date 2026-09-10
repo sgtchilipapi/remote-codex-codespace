@@ -87,7 +87,7 @@ button:disabled, input:disabled, select:disabled, textarea:disabled { opacity: .
   border: 0;
 }
 
-#configuration {
+#configuration, #settings {
   flex: 0 1 auto;
   min-width: 0;
   max-height: 48%;
@@ -97,12 +97,18 @@ button:disabled, input:disabled, select:disabled, textarea:disabled { opacity: .
   background: var(--surface);
 }
 
-#configuration[hidden] { display: none; }
+#configuration[hidden], #settings[hidden] { display: none; }
 #resume-picker[hidden] { display: none; }
 main.resume-open #messages,
 main.resume-open #status,
 main.resume-open #composer,
 main.resume-open #configuration { display: none; }
+
+main.settings-open #messages,
+main.settings-open #status,
+main.settings-open #composer,
+main.settings-open #configuration,
+main.settings-open #resume-picker { display: none; }
 
 #resume-picker {
   flex: 1 1 auto;
@@ -136,7 +142,7 @@ main.resume-open #configuration { display: none; }
 .field-hint[hidden] { display: none; }
 .field-error { min-height: 1em; color: var(--danger); font-size: 14px; }
 
-#configuration-error {
+#configuration-error, #settings-error {
   margin: 0 0 12px;
   padding: 10px;
   border: 1px solid var(--danger);
@@ -144,8 +150,8 @@ main.resume-open #configuration { display: none; }
   color: var(--danger);
 }
 
-#configuration-error[hidden], #configuration-progress[hidden] { display: none; }
-#configuration-progress { margin: 12px 0 0; color: var(--muted); }
+#configuration-error[hidden], #configuration-progress[hidden], #settings-error[hidden], #settings-progress[hidden] { display: none; }
+#configuration-progress, #settings-progress { margin: 12px 0 0; color: var(--muted); }
 .configuration-actions { justify-content: flex-end; margin-top: 16px; }
 
 #messages {
@@ -220,6 +226,7 @@ main.resume-open #configuration { display: none; }
 @media (max-width: 599px) {
   main { gap: 8px; }
   main.configuration-open #configuration { flex: 1 1 auto; max-height: none; }
+  main.settings-open #settings { flex: 1 1 auto; max-height: none; }
   main.configuration-open #messages,
   main.configuration-open #status,
   main.configuration-open #composer { display: none; }

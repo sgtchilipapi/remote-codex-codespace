@@ -13,7 +13,28 @@
     <button id="new" type="button">New</button>
     <button id="resume" type="button">Resume</button>
     <button id="configure" type="button">Configure</button>
+    <button id="settings-trigger" class="icon-button" type="button" aria-label="Settings" title="Settings">
+      <svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="3"></circle>
+        <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.6v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"></path>
+      </svg>
+    </button>
   </header>
+
+  <section id="settings" aria-labelledby="settings-heading" hidden>
+    <h2 id="settings-heading" tabindex="-1">Settings</h2>
+    <p id="settings-error" role="alert" tabindex="-1" hidden></p>
+    <div class="field">
+      <label for="token">API token</label>
+      <input id="token" type="password" autocomplete="current-password" aria-describedby="token-error">
+      <span id="token-error" class="field-error"></span>
+    </div>
+    <p id="settings-progress" role="status" aria-live="polite" hidden></p>
+    <div class="configuration-actions">
+      <button id="cancel-settings" type="button">Cancel</button>
+      <button id="apply-settings" type="button">Save and connect</button>
+    </div>
+  </section>
 
   <section id="resume-picker" aria-labelledby="resume-heading" hidden>
     <div class="resume-heading-row">
@@ -30,11 +51,6 @@
     <h2 id="configuration-heading" tabindex="-1">Configuration</h2>
     <p id="configuration-error" role="alert" tabindex="-1" hidden></p>
     <div class="configuration-grid">
-      <div class="field field-token">
-        <label for="token">API token</label>
-        <input id="token" type="password" autocomplete="current-password" aria-describedby="token-error">
-        <span id="token-error" class="field-error"></span>
-      </div>
       <div class="field">
         <label for="model">Model</label>
         <select id="model" aria-describedby="model-hint model-error" disabled><option value="">Default</option></select>

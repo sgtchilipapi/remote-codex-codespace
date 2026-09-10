@@ -10,6 +10,13 @@ const resumeResults = document.querySelector("#resume-results");
 const loadMoreThreads = document.querySelector("#load-more-threads");
 const showStatus = document.querySelector("#show-status");
 const configure = document.querySelector("#configure");
+const settingsTrigger = document.querySelector("#settings-trigger");
+const settings = document.querySelector("#settings");
+const settingsHeading = document.querySelector("#settings-heading");
+const settingsError = document.querySelector("#settings-error");
+const settingsProgress = document.querySelector("#settings-progress");
+const cancelSettings = document.querySelector("#cancel-settings");
+const applySettings = document.querySelector("#apply-settings");
 const configuration = document.querySelector("#configuration");
 const configurationHeading = document.querySelector("#configuration-heading");
 const configurationError = document.querySelector("#configuration-error");
@@ -39,6 +46,7 @@ let state = readJson("relay", { threadId: null, messages: [], activeTurn: null }
 state.activeTurn ||= null;
 let appliedConfiguration = readAppliedConfiguration();
 let configurationDraft = { ...(appliedConfiguration || emptyConfiguration) };
+let tokenDraft = appliedConfiguration?.token || "";
 let info = null;
 let ready = false;
 let checking = false;
@@ -97,26 +105,46 @@ function setConfigurationOpen(open, focusTarget = null) {
   configure.setAttribute("aria-expanded", String(open));
   configure.setAttribute("aria-controls", "configuration");
   if (open) renderConfigurationDraft();
+  setThreadControls();
+  if (focusTarget) requestAnimationFrame(() => focusTarget.focus());
+}
+
+function setSettingsOpen(open, focusTarget = null) {
+  settings.hidden = !open;
+  shell.classList.toggle("settings-open", open);
+  settingsTrigger.setAttribute("aria-expanded", String(open));
+  settingsTrigger.setAttribute("aria-controls", "settings");
+  if (open) {
+    setConfigurationOpen(false);
+    setResumeOpen(false, false);
+    tokenDraft = appliedConfiguration?.token || "";
+    token.value = tokenDraft;
+    clearSettingsError();
+  }
+  setThreadControls();
   if (focusTarget) requestAnimationFrame(() => focusTarget.focus());
 }
 
 function setThreadControls() {
   const locked = checking || activeTurn || hydrating;
-  newThread.disabled = locked || !ready;
-  resumeThread.disabled = locked || !ready;
+  const focusedView = !settings.hidden || !configuration.hidden || !resumePicker.hidden;
+  newThread.disabled = locked || !ready || focusedView;
+  resumeThread.disabled = locked || !ready || focusedView;
   showStatus.disabled = locked || !ready;
-  configure.disabled = locked;
-  send.disabled = activeTurn || !ready;
-  prompt.disabled = !ready;
+  configure.disabled = locked || !ready || !settings.hidden || !resumePicker.hidden;
+  settingsTrigger.disabled = activeTurn || checking;
+  send.disabled = activeTurn || !ready || focusedView;
+  prompt.disabled = !ready || focusedView;
 }
 
 function authorization() { return { "Authorization": `Bearer ${appliedConfiguration.token}` }; }
 
-function setResumeOpen(open) {
+function setResumeOpen(open, restoreFocus = true) {
   resumePicker.hidden = !open;
   shell.classList.toggle("resume-open", open);
+  setThreadControls();
   if (open) requestAnimationFrame(() => resumeHeading.focus());
-  else requestAnimationFrame(() => resumeThread.focus());
+  else if (restoreFocus) requestAnimationFrame(() => resumeThread.focus());
 }
 
 function displayResumeError(message) {
@@ -166,7 +194,7 @@ loadMoreThreads.addEventListener("click", () => loadThreads(loadMoreThreads.data
 
 function setConfigurationBusy(busy) {
   checking = busy;
-  for (const control of [token, permissions, cancelConfiguration, applyConfiguration]) control.disabled = busy;
+  for (const control of [permissions, cancelConfiguration, applyConfiguration]) control.disabled = busy;
   model.disabled = busy || !info;
   const selectedModel = info?.models.find((item) => item.id === configurationDraft.model);
   reasoning.disabled = busy || !selectedModel;
@@ -176,11 +204,36 @@ function setConfigurationBusy(busy) {
   setThreadControls();
 }
 
+function setSettingsBusy(busy) {
+  checking = busy;
+  token.disabled = busy;
+  cancelSettings.disabled = busy;
+  applySettings.disabled = busy;
+  cancelSettings.hidden = !ready;
+  settingsProgress.hidden = !busy;
+  settingsProgress.textContent = busy ? "Checking Settings…" : "";
+  setThreadControls();
+}
+
+function clearSettingsError() {
+  settingsError.hidden = true;
+  settingsError.textContent = "";
+  tokenError.textContent = "";
+  token.removeAttribute("aria-invalid");
+}
+
+function showSettingsError(message) {
+  settingsError.textContent = message;
+  settingsError.hidden = false;
+  tokenError.textContent = message;
+  token.setAttribute("aria-invalid", "true");
+  requestAnimationFrame(() => settingsError.focus());
+}
+
 function clearConfigurationError() {
   configurationError.hidden = true;
   configurationError.textContent = "";
   for (const [field, fieldError] of [
-    [token, tokenError],
     [model, modelError],
     [reasoning, reasoningError],
     [permissions, permissionsError],
@@ -194,7 +247,6 @@ function showConfigurationError(message, field = null) {
   configurationError.textContent = message;
   configurationError.hidden = false;
   const fieldError = new Map([
-    [token, tokenError],
     [model, modelError],
     [reasoning, reasoningError],
     [permissions, permissionsError],
@@ -320,14 +372,14 @@ async function fetchInfo(configurationToken) {
 async function checkPersistedConfiguration() {
   if (!appliedConfiguration) {
     ready = false;
-    setConfigurationOpen(true, configurationHeading);
-    setConfigurationBusy(false);
+    setSettingsOpen(true, settingsHeading);
+    setSettingsBusy(false);
     setThreadControls();
     return;
   }
 
-  setStatus("Checking configuration…");
-  setConfigurationBusy(true);
+  setStatus("Checking Settings…");
+  setSettingsBusy(true);
   try {
     info = await fetchInfo(appliedConfiguration.token);
     const normalized = normalizeConfiguration(appliedConfiguration, info);
@@ -341,17 +393,17 @@ async function checkPersistedConfiguration() {
       setStatus("");
     }
     ready = true;
-    setConfigurationOpen(false);
+    setSettingsOpen(false);
     if (state.activeTurn) void followActiveTurn();
     else await revalidateCachedThread();
   } catch (error) {
     ready = false;
-    configurationDraft = { ...appliedConfiguration };
-    setConfigurationOpen(true);
-    showConfigurationError(error.message, error.field);
-    setStatus("Configuration needs attention.");
+    tokenDraft = appliedConfiguration.token;
+    setSettingsOpen(true);
+    showSettingsError(error.message);
+    setStatus("Settings need attention.");
   } finally {
-    setConfigurationBusy(false);
+    setSettingsBusy(false);
     setThreadControls();
   }
 }
@@ -369,7 +421,9 @@ async function revalidateCachedThread() {
 }
 
 function openConfiguration() {
-  if (checking || activeTurn) return;
+  if (checking || activeTurn || !ready) return;
+  setSettingsOpen(false);
+  setResumeOpen(false, false);
   configurationDraft = { ...(appliedConfiguration || emptyConfiguration) };
   setConfigurationOpen(true, configurationHeading);
 }
@@ -386,7 +440,49 @@ configure.addEventListener("click", () => {
 });
 cancelConfiguration.addEventListener("click", closeConfiguration);
 
-token.addEventListener("input", () => { configurationDraft.token = token.value; });
+settingsTrigger.addEventListener("click", () => {
+  if (settings.hidden) setSettingsOpen(true, settingsHeading);
+});
+cancelSettings.addEventListener("click", () => {
+  if (!appliedConfiguration || checking) return;
+  tokenDraft = appliedConfiguration.token;
+  setSettingsOpen(false, settingsTrigger);
+});
+token.addEventListener("input", () => { tokenDraft = token.value; });
+
+applySettings.addEventListener("click", async () => {
+  if (checking) return;
+  clearSettingsError();
+  tokenDraft = token.value.trim();
+  token.value = tokenDraft;
+  if (!tokenDraft) {
+    showSettingsError("Enter an API token.");
+    return;
+  }
+
+  const previousConfiguration = appliedConfiguration;
+  setSettingsBusy(true);
+  try {
+    const checkedInfo = await fetchInfo(tokenDraft);
+    const tokenChanged = tokenDraft !== previousConfiguration?.token;
+    info = checkedInfo;
+    appliedConfiguration = tokenChanged
+      ? { token: tokenDraft, model: "", reasoning: "", permissions: "" }
+      : normalizeConfiguration(previousConfiguration, checkedInfo);
+    configurationDraft = { ...appliedConfiguration };
+    saveAppliedConfiguration();
+    ready = true;
+    setSettingsOpen(false, settingsTrigger);
+    setStatus("");
+  } catch (error) {
+    appliedConfiguration = previousConfiguration;
+    showSettingsError(error.message);
+  } finally {
+    setSettingsBusy(false);
+    setThreadControls();
+  }
+});
+
 permissions.addEventListener("change", () => { configurationDraft.permissions = permissions.value; });
 model.addEventListener("change", () => {
   configurationDraft.model = model.value;
@@ -402,29 +498,20 @@ applyConfiguration.addEventListener("click", async () => {
   if (checking) return;
   clearConfigurationError();
   configurationDraft = {
-    token: token.value.trim(),
+    token: appliedConfiguration.token,
     model: model.value,
     reasoning: reasoning.value,
     permissions: permissions.value,
   };
-  token.value = configurationDraft.token;
-  if (!configurationDraft.token) {
-    showConfigurationError("Enter an API token.", token);
-    return;
-  }
-
   setConfigurationBusy(true);
   try {
-    const checkedInfo = await fetchInfo(configurationDraft.token);
-    const validationFailure = validateDraft(configurationDraft, checkedInfo);
+    const validationFailure = validateDraft(configurationDraft, info);
     if (validationFailure) {
-      info = checkedInfo;
       renderModelOptions();
       showConfigurationError(validationFailure.message, validationFailure.field);
       return;
     }
 
-    info = checkedInfo;
     appliedConfiguration = { ...configurationDraft };
     if (state.threadId) persistedThreadConfiguration = false;
     saveAppliedConfiguration();

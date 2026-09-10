@@ -116,7 +116,7 @@ test("selecting an Eligible Thread atomically installs history without starting 
   expect(await page.evaluate(() => JSON.parse(localStorage.relay).threadId)).toBe(resumableThreadId);
 });
 
-test("startup checking locks Thread actions and normalizes obsolete choices", async ({ page }) => {
+test("startup checking locks every Thread entry action until live availability loads", async ({ page }) => {
   const obsoleteConfiguration = {
     token: "valid-token",
     model: "retired-model",
@@ -136,7 +136,9 @@ test("startup checking locks Thread actions and normalizes obsolete choices", as
   await expect(page.getByRole("button", { name: "New" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Configure" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Send" })).toBeDisabled();
-  await expect(page.getByRole("status")).toContainText("Checking configuration");
+  await expect(page.getByRole("button", { name: "Resume" })).toBeDisabled();
+  await expect(page.getByLabel("Prompt")).toBeDisabled();
+  await expect(page.getByRole("status")).toContainText("Checking Settings");
   releaseInfo();
 
   await expect(page.getByRole("button", { name: "Configure" })).toBeEnabled();
@@ -149,7 +151,7 @@ test("startup checking locks Thread actions and normalizes obsolete choices", as
   await expect(page.getByRole("status")).toContainText("reset to Default");
 });
 
-test("failed startup checking opens Configuration with applied values intact", async ({ page }) => {
+test("failed startup checking opens Settings with the committed token and no cancellation", async ({ page }) => {
   const persistedConfiguration = {
     token: "persisted-secret",
     model: "codex-1",
@@ -162,24 +164,19 @@ test("failed startup checking opens Configuration with applied values intact", a
   await page.route("**/info", (route) => route.fulfill({ status: 401, json: { error: "Unauthorized" } }));
   await page.goto("/");
 
-  await expect(page.getByRole("heading", { name: "Configuration" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
   await expect(page.getByLabel("API token")).toHaveValue("persisted-secret");
-  await expect(page.getByLabel("Model", { exact: true })).toHaveValue("codex-1");
-  await expect(page.getByLabel("Reasoning effort")).toHaveValue("high");
-  await expect(page.getByLabel("Permissions")).toHaveValue("read-only");
   await expect(page.getByRole("alert")).not.toContainText("persisted-secret");
-  await expect(page.getByRole("button", { name: "Cancel", exact: true })).toHaveCount(2);
-
-  await page.getByRole("button", { name: "Cancel", exact: true }).last().click();
-  await expect(page.getByLabel("Prompt")).toBeVisible();
-  await expect(page.getByLabel("Prompt")).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Cancel", exact: true })).toBeHidden();
+  await expect(page.getByRole("button", { name: "New" })).toBeDisabled();
 });
 
-test("Configuration Apply commits a complete trimmed draft atomically", async ({ page }) => {
+test("successful token replacement preserves the Thread and resets requested Configuration", async ({ page }) => {
   const authorizations = [];
   await page.addInitScript((configuration) => {
     localStorage.setItem("relayConfiguration", JSON.stringify(configuration));
-  }, appliedConfiguration);
+    localStorage.setItem("relay", JSON.stringify({ threadId: null, messages: [{ role: "assistant", text: "Kept transcript" }] }));
+  }, { token: "valid-token", model: "codex-1", reasoning: "high", permissions: "read-only" });
   await page.route("**/info", (route) => {
     authorizations.push(route.request().headers().authorization);
     return route.fulfill({ json: modelInfo });
@@ -188,24 +185,22 @@ test("Configuration Apply commits a complete trimmed draft atomically", async ({
   await expect(page.getByRole("button", { name: "Configure" })).toBeEnabled();
   authorizations.length = 0;
 
-  await page.getByRole("button", { name: "Configure" }).click();
+  await page.getByRole("button", { name: "Settings" }).click();
   await page.getByLabel("API token").fill("  replacement-token  ");
-  await page.getByLabel("Model", { exact: true }).selectOption("codex-1");
-  await page.getByLabel("Reasoning effort").selectOption("high");
-  await page.getByLabel("Permissions").selectOption("workspace-write");
-  await page.getByRole("button", { name: "Apply and close" }).click();
+  await page.getByRole("button", { name: "Save and connect" }).click();
 
-  await expect(page.getByRole("button", { name: "Configure" })).toBeFocused();
+  await expect(page.getByRole("button", { name: "Settings" })).toBeFocused();
+  await expect(page.getByText("Kept transcript")).toBeVisible();
   expect(authorizations).toEqual(["Bearer replacement-token"]);
   await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.relayConfiguration))).toEqual({
     token: "replacement-token",
-    model: "codex-1",
-    reasoning: "high",
-    permissions: "workspace-write",
+    model: "",
+    reasoning: "",
+    permissions: "",
   });
 });
 
-test("pending Apply locks Configuration and cannot submit twice", async ({ page }) => {
+test("pending Settings validation locks conflicting actions and cannot submit twice", async ({ page }) => {
   let requestCount = 0;
   let releaseInfo;
   await page.goto("/");
@@ -215,32 +210,31 @@ test("pending Apply locks Configuration and cannot submit twice", async ({ page 
     await route.fulfill({ json: modelInfo });
   });
   await page.getByLabel("API token").fill("valid-token");
-  await page.getByRole("button", { name: "Apply and close" }).click();
+  await page.getByRole("button", { name: "Save and connect" }).click();
 
   await expect(page.getByLabel("API token")).toBeDisabled();
-  await expect(page.getByRole("button", { name: "Apply and close" })).toBeDisabled();
-  await page.getByRole("button", { name: "Apply and close" }).evaluate((button) => button.click());
+  await expect(page.getByRole("button", { name: "Save and connect" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "New" })).toBeDisabled();
+  await page.getByRole("button", { name: "Save and connect" }).evaluate((button) => button.click());
   expect(requestCount).toBe(1);
   releaseInfo();
   await expect(page.getByRole("button", { name: "Configure" })).toBeEnabled();
   expect(requestCount).toBe(1);
 });
 
-test("Cancel discards the whole Configuration draft", async ({ page }) => {
+test("Cancel discards a later Settings token draft", async ({ page }) => {
   await openConfiguredClient(page);
 
-  await page.getByRole("button", { name: "Configure" }).click();
+  await page.getByRole("button", { name: "Settings" }).click();
   await page.getByLabel("API token").fill("abandoned-token");
-  await page.getByLabel("Permissions").selectOption("read-only");
-  await page.getByRole("button", { name: "Cancel", exact: true }).last().click();
-  await page.getByRole("button", { name: "Configure" }).click();
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.getByRole("button", { name: "Settings" }).click();
 
   await expect(page.getByLabel("API token")).toHaveValue("valid-token");
-  await expect(page.getByLabel("Permissions")).toHaveValue("");
   expect(await page.evaluate(() => JSON.parse(localStorage.relayConfiguration))).toEqual(appliedConfiguration);
 });
 
-test("failed Apply preserves the draft and the applied configuration without revealing the token", async ({ page }) => {
+test("failed token replacement preserves its draft and all authenticated state", async ({ page }) => {
   let requestCount = 0;
   await page.addInitScript((configuration) => {
     localStorage.setItem("relayConfiguration", JSON.stringify(configuration));
@@ -252,10 +246,9 @@ test("failed Apply preserves the draft and the applied configuration without rev
   });
   await page.goto("/");
   await expect(page.getByRole("button", { name: "Configure" })).toBeEnabled();
-  await page.getByRole("button", { name: "Configure" }).click();
+  await page.getByRole("button", { name: "Settings" }).click();
   await page.getByLabel("API token").fill("secret-rejected-token");
-  await page.getByLabel("Permissions").selectOption("read-only");
-  await page.getByRole("button", { name: "Apply and close" }).click();
+  await page.getByRole("button", { name: "Save and connect" }).click();
 
   const error = page.getByRole("alert");
   await expect(error).toBeFocused();
@@ -265,123 +258,6 @@ test("failed Apply preserves the draft and the applied configuration without rev
   await expect(page.getByLabel("API token")).toHaveAttribute("aria-invalid", "true");
   await expect(page.locator("#token-error")).toContainText("rejected");
   expect(await page.evaluate(() => JSON.parse(localStorage.relayConfiguration))).toEqual(appliedConfiguration);
-});
-
-for (const failure of [
-  { name: "Relay/Codespace unavailability", respond: (route) => route.fulfill({ status: 502, json: { error: "Unavailable" } }), expected: "unavailable" },
-  { name: "network failure", respond: (route) => route.abort("failed"), expected: "unavailable" },
-  { name: "unexpected response", respond: (route) => route.fulfill({ status: 500, json: { error: "Nope" } }), expected: "could not be checked" },
-]) {
-  test(`Apply preserves its draft after ${failure.name}`, async ({ page }) => {
-    let requestCount = 0;
-    await page.addInitScript((configuration) => {
-      localStorage.setItem("relayConfiguration", JSON.stringify(configuration));
-    }, appliedConfiguration);
-    await page.route("**/info", (route) => {
-      requestCount += 1;
-      if (requestCount === 1) return route.fulfill({ json: modelInfo });
-      return failure.respond(route);
-    });
-    await page.goto("/");
-    await expect(page.getByRole("button", { name: "Configure" })).toBeEnabled();
-    await page.getByRole("button", { name: "Configure" }).click();
-    await page.getByLabel("API token").fill("draft-token");
-
-    await page.getByRole("button", { name: "Apply and close" }).click();
-
-    await expect(page.getByRole("alert")).toContainText(failure.expected);
-    await expect(page.getByLabel("API token")).toHaveValue("draft-token");
-    expect(await page.evaluate(() => JSON.parse(localStorage.relayConfiguration))).toEqual(appliedConfiguration);
-  });
-}
-
-test("invalid permissions remain visible and associated with their Apply error", async ({ page }) => {
-  await openConfiguredClient(page);
-  await page.getByRole("button", { name: "Configure" }).click();
-  await page.getByLabel("Permissions").evaluate((select) => {
-    select.add(new Option("dangerous", "dangerous"));
-    select.value = "dangerous";
-    select.dispatchEvent(new Event("change", { bubbles: true }));
-  });
-
-  await page.getByRole("button", { name: "Apply and close" }).click();
-
-  await expect(page.getByRole("alert")).toContainText("permissions are invalid");
-  await expect(page.getByLabel("Permissions")).toHaveValue("dangerous");
-  await expect(page.getByLabel("Permissions")).toHaveAttribute("aria-invalid", "true");
-  await expect(page.locator("#permissions-error")).toContainText("permissions are invalid");
-  expect(await page.evaluate(() => JSON.parse(localStorage.relayConfiguration))).toEqual(appliedConfiguration);
-});
-
-test("changing model resets only an unsupported reasoning draft", async ({ page }) => {
-  await page.addInitScript((configuration) => {
-    localStorage.setItem("relayConfiguration", JSON.stringify(configuration));
-  }, { token: "valid-token", model: "codex-1", reasoning: "high", permissions: "read-only" });
-  await page.route("**/info", (route) => route.fulfill({ json: modelInfo }));
-  await page.goto("/");
-  await expect(page.getByRole("button", { name: "Configure" })).toBeEnabled();
-
-  await page.getByRole("button", { name: "Configure" }).click();
-  await page.getByLabel("Model", { exact: true }).selectOption("codex-mini");
-
-  await expect(page.getByLabel("Reasoning effort")).toHaveValue("");
-  await expect(page.getByLabel("Permissions")).toHaveValue("read-only");
-});
-
-test("failed consistency validation keeps every draft choice intact", async ({ page }) => {
-  const staleConfiguration = {
-    token: "valid-token",
-    model: "retired-model",
-    reasoning: "high",
-    permissions: "read-only",
-  };
-  let requestCount = 0;
-  await page.addInitScript((configuration) => {
-    localStorage.setItem("relayConfiguration", JSON.stringify(configuration));
-  }, staleConfiguration);
-  await page.route("**/info", (route) => {
-    requestCount += 1;
-    if (requestCount === 1) return route.fulfill({ status: 502, json: { error: "Unavailable" } });
-    return route.fulfill({ json: modelInfo });
-  });
-  await page.goto("/");
-  await expect(page.getByRole("alert")).toContainText("unavailable");
-
-  await page.getByRole("button", { name: "Apply and close" }).click();
-
-  await expect(page.getByRole("alert")).toContainText("model is no longer available");
-  await expect(page.getByLabel("Model", { exact: true })).toHaveValue("retired-model");
-  await expect(page.getByLabel("Model", { exact: true })).toHaveAttribute("aria-invalid", "true");
-  await expect(page.locator("#model-error")).toContainText("model is no longer available");
-  await expect(page.getByLabel("Reasoning effort")).toHaveValue("high");
-  expect(await page.evaluate(() => JSON.parse(localStorage.relayConfiguration))).toEqual(staleConfiguration);
-});
-
-test("unsupported reasoning remains visible and associated with its Apply error", async ({ page }) => {
-  const staleConfiguration = {
-    token: "valid-token",
-    model: "codex-1",
-    reasoning: "ultra",
-    permissions: "read-only",
-  };
-  let requestCount = 0;
-  await page.addInitScript((configuration) => {
-    localStorage.setItem("relayConfiguration", JSON.stringify(configuration));
-  }, staleConfiguration);
-  await page.route("**/info", (route) => {
-    requestCount += 1;
-    if (requestCount === 1) return route.fulfill({ status: 502, json: { error: "Unavailable" } });
-    return route.fulfill({ json: modelInfo });
-  });
-  await page.goto("/");
-
-  await page.getByRole("button", { name: "Apply and close" }).click();
-
-  await expect(page.getByRole("alert")).toContainText("reasoning effort is not supported");
-  await expect(page.getByLabel("Reasoning effort")).toHaveValue("ultra");
-  await expect(page.getByLabel("Reasoning effort")).toHaveAttribute("aria-invalid", "true");
-  await expect(page.locator("#reasoning-error")).toContainText("reasoning effort is not supported");
-  expect(await page.evaluate(() => JSON.parse(localStorage.relayConfiguration))).toEqual(staleConfiguration);
 });
 
 test("an active Turn locks actions, keeps prompt focus, and uses Applied configuration", async ({ page }) => {
@@ -659,17 +535,16 @@ test("viewport resize follows the bottom or preserves the visible reading anchor
   expect(Math.abs(after.offset - before.offset)).toBeLessThanOrEqual(2);
 });
 
-test("first use opens Configuration as a focused view", async ({ page }) => {
+test("first use opens non-cancellable Settings as a focused view", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/");
 
-  await expect(page.getByRole("heading", { name: "Configuration" })).toBeFocused();
-  await expect(page.getByRole("button", { name: "Apply and close" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Cancel" })).toHaveCount(0);
-  await expect(page.getByLabel("Model", { exact: true })).toBeDisabled();
-  await expect(page.getByLabel("Reasoning effort")).toBeDisabled();
-  await expect(page.locator("#model-hint")).toContainText("Apply an API token");
-  await expect(page.locator("#reasoning-hint")).toContainText("Apply an API token");
+  await expect(page.getByRole("heading", { name: "Settings" })).toBeFocused();
+  await expect(page.getByRole("button", { name: "Save and connect" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Cancel" })).toBeHidden();
+  await expect(page.getByRole("button", { name: "New" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Resume" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Configure" })).toBeDisabled();
   await expect(page.locator("#messages")).toBeHidden();
   await expect(page.locator("#prompt")).toBeHidden();
 });
@@ -683,11 +558,11 @@ test("missing token is rejected without contacting the Relay", async ({ page }) 
   await page.goto("/");
   await page.getByLabel("API token").fill("   ");
 
-  await page.getByRole("button", { name: "Apply and close" }).click();
+  await page.getByRole("button", { name: "Save and connect" }).click();
 
   await expect(page.getByRole("alert")).toBeFocused();
   await expect(page.getByLabel("API token")).toHaveAttribute("aria-invalid", "true");
-  await expect(page.getByRole("heading", { name: "Configuration" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
   expect(requestCount).toBe(0);
 });
 
@@ -729,7 +604,7 @@ test("compact controls expose labels, visible focus, live status, and usable tar
 
   await configure.click();
   await expect(page.getByRole("heading", { name: "Configuration" })).toBeFocused();
-  await expect(page.getByLabel("API token")).toBeVisible();
+  await expect(page.getByLabel("API token")).toBeHidden();
   await expect(page.getByLabel("Model", { exact: true })).toBeVisible();
   await expect(page.getByLabel("Reasoning effort")).toBeVisible();
   await expect(page.getByLabel("Permissions")).toBeVisible();
