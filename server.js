@@ -73,10 +73,13 @@ function effectiveConfiguration(resumed) {
   };
 }
 function validateCursor(value, required = false) { if ((required && !value) || (value != null && (typeof value !== "string" || !value || Buffer.byteLength(value) > 4096 || /[\u0000-\u001f\u007f]/.test(value)))) throw new RelayError(400, "Invalid cursor"); }
+const TURN_PERMISSION_POLICIES = {
+  "read-only": { sandboxPolicy: { type: "readOnly" }, approvalPolicy: "untrusted" },
+  "workspace-write": { sandboxPolicy: { type: "workspaceWrite" }, approvalPolicy: "on-request" },
+};
 function applyTurnPermissions(params, permissions) {
   if (!permissions) return;
-  params.sandboxPolicy = permissions;
-  params.approvalPolicy = permissions === "read-only" ? "untrusted" : "on-request";
+  Object.assign(params, TURN_PERMISSION_POLICIES[permissions]);
 }
 
 const PERMISSIONS = [{ id: "read-only", name: "read only" }, { id: "workspace-write", name: "workspace write" }];

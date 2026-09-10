@@ -115,18 +115,18 @@ test("a resolved Configuration carries Fast mode into the first Turn exactly onc
   const originalRequest = appServer.request;
   appServer.request = async (method, params) => {
     if (method === "model/list") return { data: [{ id: "codex-1", displayName: "Codex 1", isDefault: true, defaultReasoningEffort: "medium", supportedReasoningEfforts: [{ reasoningEffort: "high" }], serviceTiers: [{ id: "priority", name: "Fast" }] }] };
-    if (method === "config/read") return { config: { model: "codex-1", model_reasoning_effort: "high", sandbox_mode: "read-only" } };
+    if (method === "config/read") return { config: { model: "codex-1", model_reasoning_effort: "high", sandbox_mode: "workspace-write" } };
     return originalRequest(method, params);
   };
   const relay = await serve(appServer); t.after(relay.close);
-  const resolved = await fetch(`${relay.base}/configuration/resolve`, authorized({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: "codex-1", reasoning: "high", permissions: "read-only", fastMode: true }) }));
+  const resolved = await fetch(`${relay.base}/configuration/resolve`, authorized({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: "codex-1", reasoning: "high", permissions: "workspace-write", fastMode: true }) }));
   const { configurationRevision } = await resolved.json();
   const created = await start(relay.base, { turnId: relayTurnId, prompt: "Go fast", model: "untrusted-model", reasoning: "low", permissions: "workspace-write", fastMode: true, configurationRevision });
   assert.equal(created.status, 202);
   await new Promise((resolve) => setImmediate(resolve));
 
-  assert.deepEqual(appServer.calls.find(({ method }) => method === "thread/start").params, { cwd: "/repo", model: "codex-1", sandbox: "read-only" });
-  assert.deepEqual(appServer.calls.find(({ method }) => method === "turn/start").params, { threadId, input: [{ type: "text", text: "Go fast" }], effort: "high", sandboxPolicy: "read-only", approvalPolicy: "untrusted", serviceTier: "priority" });
+  assert.deepEqual(appServer.calls.find(({ method }) => method === "thread/start").params, { cwd: "/repo", model: "codex-1", sandbox: "workspace-write" });
+  assert.deepEqual(appServer.calls.find(({ method }) => method === "turn/start").params, { threadId, input: [{ type: "text", text: "Go fast" }], effort: "high", sandboxPolicy: { type: "workspaceWrite" }, approvalPolicy: "on-request", serviceTier: "priority" });
 });
 
 test("an obsolete Configuration revision is rejected before a Thread starts", async (t) => {
