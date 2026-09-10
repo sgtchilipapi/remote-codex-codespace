@@ -1,194 +1,65 @@
 <!doctype html>
 <html lang="en">
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#111827">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <link rel="manifest" href="/manifest.json">
 <title>Codex Relay</title>
-<style>
-  * { box-sizing: border-box; }
-  body { margin: 0; background: #111827; color: #e5e7eb; font: 16px system-ui; }
-  main { max-width: 720px; min-height: 100dvh; margin: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
-  header, form, nav { display: flex; gap: 8px; }
-  header { align-items: center; flex-wrap: wrap; }
-  nav { width: 100%; }
-  h1 { margin: 0; font-size: 18px; flex: 1; }
-  #messages { flex: 1; overflow-wrap: anywhere; white-space: pre-wrap; }
-  .message { padding: 12px; margin: 8px 0; border-radius: 10px; background: #1f2937; }
-  .user { background: #1d4ed8; }
-  input, textarea, button { font: inherit; border: 0; border-radius: 8px; padding: 10px; }
-  input, textarea { color: #111827; background: white; }
-  #token { width: 150px; }
-  #model { min-width: 0; flex: 1; }
-  textarea { flex: 1; resize: none; }
-  button { background: #e5e7eb; color: #111827; }
-  button:disabled { opacity: .5; }
-  #status { color: #9ca3af; min-height: 1.2em; }
-</style>
-<main>
+<link rel="stylesheet" href="/styles.css">
+<main id="app-shell">
   <header>
     <h1>Codex Relay</h1>
-    <input id="token" type="password" placeholder="API token" aria-label="API token">
-    <nav>
-      <button id="new" type="button">New</button>
-      <button id="show-status" type="button">Status</button>
-      <select id="model" aria-label="Model">
-        <option value="">Load models</option>
-      </select>
-      <select id="reasoning" aria-label="Reasoning">
-        <option value="">Default reasoning</option>
-      </select>
-      <select id="permissions" aria-label="Permissions">
-        <option value="">Default permissions</option>
-        <option value="read-only">read only</option>
-        <option value="workspace-write">workspace write</option>
-      </select>
-    </nav>
+    <button id="new" type="button">New</button>
+    <button id="show-status" type="button">Status</button>
+    <button id="configure" type="button">Configure</button>
   </header>
-  <div id="messages"></div>
-  <div id="status"></div>
-  <form>
-    <textarea id="prompt" rows="3" placeholder="Ask Codex…" required></textarea>
+
+  <section id="configuration" aria-labelledby="configuration-heading" hidden>
+    <h2 id="configuration-heading" tabindex="-1">Configuration</h2>
+    <p id="configuration-error" role="alert" tabindex="-1" hidden></p>
+    <div class="configuration-grid">
+      <div class="field field-token">
+        <label for="token">API token</label>
+        <input id="token" type="password" autocomplete="current-password" aria-describedby="token-error">
+        <span id="token-error" class="field-error"></span>
+      </div>
+      <div class="field">
+        <label for="model">Model</label>
+        <select id="model" aria-describedby="model-hint model-error" disabled><option value="">Default</option></select>
+        <span id="model-hint" class="field-hint">Apply an API token to load models.</span>
+        <span id="model-error" class="field-error"></span>
+      </div>
+      <div class="field">
+        <label for="reasoning">Reasoning effort</label>
+        <select id="reasoning" aria-describedby="reasoning-hint reasoning-error" disabled><option value="">Default</option></select>
+        <span id="reasoning-hint" class="field-hint">Apply an API token to load reasoning efforts.</span>
+        <span id="reasoning-error" class="field-error"></span>
+      </div>
+      <div class="field">
+        <label for="permissions">Permissions</label>
+        <select id="permissions" aria-describedby="permissions-error">
+          <option value="">Default</option>
+          <option value="read-only">read only</option>
+          <option value="workspace-write">workspace write</option>
+        </select>
+        <span id="permissions-error" class="field-error"></span>
+      </div>
+    </div>
+    <p id="configuration-progress" role="status" aria-live="polite" hidden></p>
+    <div class="configuration-actions">
+      <button id="cancel-configuration" type="button">Cancel</button>
+      <button id="apply-configuration" type="button">Apply and close</button>
+    </div>
+  </section>
+
+  <div id="messages" aria-label="Thread messages"></div>
+  <div id="status" role="status" aria-live="polite" aria-atomic="true"></div>
+  <form id="composer">
+    <label class="visually-hidden" for="prompt">Prompt</label>
+    <textarea id="prompt" rows="1" placeholder="Ask Codex…" required></textarea>
     <button id="send">Send</button>
   </form>
 </main>
-<script>
-  const token = document.querySelector("#token");
-  const messages = document.querySelector("#messages");
-  const status = document.querySelector("#status");
-  const form = document.querySelector("form");
-  const prompt = document.querySelector("#prompt");
-  const send = document.querySelector("#send");
-  const model = document.querySelector("#model");
-  const reasoning = document.querySelector("#reasoning");
-  const permissions = document.querySelector("#permissions");
-  let state = JSON.parse(localStorage.getItem("relay") || '{"threadId":null,"messages":[]}');
-  token.value = localStorage.getItem("token") || "";
-  let info;
-  permissions.value = localStorage.getItem("permissions") || "";
-
-  function save() { localStorage.setItem("relay", JSON.stringify(state)); }
-  function draw() {
-    messages.replaceChildren(...state.messages.map(({ role, text }) => {
-      const node = document.createElement("div");
-      node.className = `message ${role}`;
-      node.textContent = text;
-      return node;
-    }));
-    window.scrollTo(0, document.body.scrollHeight);
-  }
-
-  document.querySelector("#new").onclick = () => {
-    state = { threadId: null, messages: [] };
-    save();
-    draw();
-  };
-
-  async function loadInfo() {
-    const response = await fetch("/info", { headers: { "Authorization": `Bearer ${token.value}` } });
-    if (!response.ok) throw new Error((await response.json()).error);
-    info = await response.json();
-    const candidate = model.value || localStorage.getItem("model");
-    const selected = info.models.some(({ id }) => id === candidate)
-      ? candidate
-      : info.models.find(({ isDefault }) => isDefault)?.id;
-    model.replaceChildren(...info.models.map((item) => new Option(item.name, item.id)));
-    model.value = selected;
-    updateReasoning();
-  }
-
-  function updateReasoning() {
-    const selected = info.models.find(({ id }) => id === model.value);
-    const saved = localStorage.getItem("reasoning") || selected.defaultReasoning;
-    reasoning.replaceChildren(...selected.reasoning.map((effort) => new Option(effort, effort)));
-    reasoning.value = selected.reasoning.includes(saved) ? saved : selected.defaultReasoning;
-  }
-
-  model.onchange = () => {
-    localStorage.setItem("model", model.value);
-    updateReasoning();
-    localStorage.setItem("reasoning", reasoning.value);
-  };
-  reasoning.onchange = () => localStorage.setItem("reasoning", reasoning.value);
-  permissions.onchange = () => localStorage.setItem("permissions", permissions.value);
-  token.onchange = () => loadInfo().catch((error) => { status.textContent = error.message; });
-
-  document.querySelector("#show-status").onclick = async () => {
-    status.textContent = "Loading status…";
-    try { await loadInfo(); } catch (error) { status.textContent = error.message; return; }
-    const limits = info.rateLimits;
-    status.textContent = [
-      `Thread: ${state.threadId || "new"}`,
-      `Model: ${model.value}`,
-      `Reasoning: ${reasoning.value}`,
-      `Permissions: ${permissions.value || "default"}`,
-      limits.primary && `5h: ${limits.primary.usedPercent}% used`,
-      limits.secondary && `Weekly: ${limits.secondary.usedPercent}% used`,
-      `Plan: ${limits.planType}`,
-    ].filter(Boolean).join(" · ");
-  };
-
-  form.onsubmit = async (event) => {
-    event.preventDefault();
-    const text = prompt.value.trim();
-    if (!text) return;
-    localStorage.setItem("token", token.value);
-    localStorage.setItem("model", model.value);
-    localStorage.setItem("reasoning", reasoning.value);
-    localStorage.setItem("permissions", permissions.value);
-    state.messages.push({ role: "user", text }, { role: "assistant", text: "" });
-    prompt.value = "";
-    send.disabled = true;
-    status.textContent = "Codex is working…";
-    draw();
-
-    try {
-      const response = await fetch("/turn", {
-        method: "POST",
-        headers: { "Authorization": `Bearer ${token.value}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          prompt: text,
-          threadId: state.threadId,
-          model: model.value || undefined,
-          reasoning: reasoning.value || undefined,
-          permissions: permissions.value || undefined,
-        }),
-      });
-      if (!response.ok) throw new Error((await response.json()).error);
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      while (true) {
-        const { value, done } = await reader.read();
-        buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
-        const lines = buffer.split("\n");
-        buffer = lines.pop();
-        for (const line of lines) {
-          if (!line) continue;
-          const event = JSON.parse(line);
-          if (event.type === "thread.started") state.threadId = event.thread_id;
-          if (event.type === "item.completed" && event.item?.type === "agent_message") {
-            state.messages.at(-1).text += event.item.text;
-            draw();
-          }
-          if (event.type === "error") throw new Error(event.message);
-        }
-        if (done) break;
-      }
-      status.textContent = "";
-    } catch (error) {
-      state.messages.at(-1).text = `Error: ${error.message}`;
-      status.textContent = "Disconnected";
-      draw();
-    } finally {
-      send.disabled = false;
-      save();
-    }
-  };
-
-  draw();
-  if (token.value) loadInfo().catch((error) => { status.textContent = error.message; });
-</script>
+<script src="/client.js"></script>
 </html>

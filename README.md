@@ -18,3 +18,17 @@ curl -H "Authorization: Bearer $API_TOKEN" https://YOUR-SERVICE/test
 ```
 
 Codex must already be installed and authenticated in the Codespace, which must run an SSH server.
+
+## Verification
+
+Run the automated Chromium behavior and responsive-layout suite with:
+
+```sh
+npm test
+```
+
+Before releasing Mobile Client layout changes, record the required iPhone Safari and Android Chrome smoke pass with:
+
+```sh
+./scripts/verify-mobile-client.sh
+```

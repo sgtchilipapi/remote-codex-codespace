@@ -46,3 +46,11 @@ Markdown beyond fenced code, Turn interruption or reconnect controls, richer Thr
 ## Further Notes
 
 The planning map is the detailed acceptance reference if an edge case is unclear.
+
+## Comments
+
+### 2026-09-10 — Implementation candidate
+
+Implemented the responsive Mobile Client contract without changing the Relay API. The Chromium behavior/geometry suite and static syntax checks pass. Added [`scripts/verify-mobile-client.sh`](../../scripts/verify-mobile-client.sh) to guide and record the required iPhone Safari and Android Chrome smoke passes.
+
+The issue remains open until those two real-device browser passes are recorded, as required by the acceptance contract.
