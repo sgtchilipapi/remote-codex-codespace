@@ -72,6 +72,7 @@ let programmaticFollowPending = false;
 let userScrollIntent = false;
 let readingAnchor = null;
 let lastAnnouncedActivity = null;
+let lastStatusSnapshot = null;
 
 function readJson(key, fallback) {
   try { return JSON.parse(localStorage.getItem(key)) || fallback; }
@@ -116,6 +117,82 @@ function saveAppliedConfiguration() {
 }
 
 function setStatus(message) { status.textContent = message; }
+
+function statusField(field, format = (value) => String(value)) {
+  return field && Object.hasOwn(field, "value") ? format(field.value) : "Unavailable";
+}
+
+function readablePermissions(value) {
+  if (typeof value === "string") return configurationName(configurationCatalog?.permissions, value);
+  if (!value || typeof value !== "object") return "Unavailable";
+  const sandbox = typeof value.sandboxPolicy === "string" ? value.sandboxPolicy : value.sandboxPolicy?.type;
+  return [sandbox?.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase(), value.approvalPolicy, value.profile].filter(Boolean).join(" · ") || "Unavailable";
+}
+
+function localReset(value) {
+  const date = new Date(typeof value === "number" && value < 10_000_000_000 ? value * 1000 : value);
+  if (Number.isNaN(date.valueOf())) return { text: "Unavailable", label: "Unavailable", dateTime: "" };
+  const text = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(date);
+  const zone = new Intl.DateTimeFormat(undefined, { timeZoneName: "long" }).formatToParts(date).find(({ type }) => type === "timeZoneName")?.value || "local time";
+  return { text, label: `${text}, ${zone}`, dateTime: date.toISOString() };
+}
+
+function renderStatusSnapshot(snapshot, forceStale = false) {
+  status.replaceChildren();
+  const lines = document.createElement("div");
+  lines.className = "status-details";
+  const add = (label, value) => { const line = document.createElement("div"); line.textContent = `${label}: ${value}`; lines.append(line); };
+  add("Model", statusField(snapshot.configuration?.model, (value) => configurationName(configurationCatalog?.models, value)));
+  add("Reasoning", statusField(snapshot.configuration?.reasoning));
+  add("Permissions", statusField(snapshot.configuration?.permissions, readablePermissions));
+  add("Fast mode", statusField(snapshot.configuration?.fastMode, (value) => value?.enabled === true ? "On" : value?.enabled === false ? "Off" : `Unavailable${value?.serviceTier ? ` (${value.serviceTier})` : ""}`));
+  add("Context usage", snapshot.context?.reason === "not_started" ? "Not started" : statusField(snapshot.context, (value) => `${Number(value.usedTokens).toLocaleString()} / ${Number(value.windowTokens).toLocaleString()} (${Number(value.percentage).toLocaleString(undefined, { maximumFractionDigits: 1 })}%)`));
+  for (const [key, label] of [["fiveHour", "5-hour"], ["weekly", "Weekly"]]) {
+    const window = snapshot.rateLimits?.[key] || {};
+    const line = document.createElement("div");
+    const remaining = statusField(window.remainingPercent, (value) => `${value}%`);
+    line.append(`${label}: ${remaining} remaining · Resets `);
+    if (window.resetsAt && Object.hasOwn(window.resetsAt, "value")) {
+      const reset = localReset(window.resetsAt.value); const time = document.createElement("time"); time.dateTime = reset.dateTime; time.setAttribute("aria-label", reset.label); time.textContent = reset.text; line.append(time);
+    } else line.append("Unavailable");
+    lines.append(line);
+  }
+  const fields = [snapshot.context, ...Object.values(snapshot.configuration || {}), ...Object.values(snapshot.rateLimits || {}).flatMap((window) => Object.values(window || {}))];
+  const stale = forceStale || fields.some((field) => field?.stale) || Boolean(snapshot.errors?.length);
+  if (stale) {
+    const observed = fields.filter((field) => field?.observedAt).map((field) => new Date(field.observedAt).valueOf()).filter(Number.isFinite);
+    const updated = observed.length ? new Date(Math.max(...observed)).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }) : "unknown";
+    add("Last updated", updated);
+    const warning = document.createElement("div"); warning.className = "status-warning"; warning.textContent = "May be outdated · Status refresh failed."; lines.append(warning);
+  }
+  status.append(lines);
+  if (stale) {
+    const retry = document.createElement("button"); retry.type = "button"; retry.className = "status-retry"; retry.textContent = "Retry"; retry.setAttribute("aria-label", "Retry status"); retry.addEventListener("click", refreshStatus); status.append(retry);
+  }
+}
+
+async function refreshStatus() {
+  setStatus("Loading status…");
+  const expectedThreadId = state.threadId || null;
+  try {
+    const query = state.threadId ? `?threadId=${encodeURIComponent(state.threadId)}` : "";
+    const response = await fetch(`/status${query}`, { headers: authorization() });
+    if (!response.ok) throw new Error("Status is unavailable. Try again.");
+    const snapshot = await response.json();
+    if (snapshot?.scope?.threadId !== expectedThreadId || !snapshot.configuration || !snapshot.rateLimits) throw new Error("Status is unavailable. Try again.");
+    lastStatusSnapshot = snapshot;
+    renderStatusSnapshot(snapshot);
+  } catch {
+    if (lastStatusSnapshot?.scope?.threadId === expectedThreadId) renderStatusSnapshot(lastStatusSnapshot, true);
+    else renderStatusSnapshot({
+      scope: { threadId: expectedThreadId },
+      configuration: { model: {}, reasoning: {}, permissions: {}, fastMode: {} },
+      context: expectedThreadId ? {} : { reason: "not_started" },
+      rateLimits: { fiveHour: { remainingPercent: {}, resetsAt: {} }, weekly: { remainingPercent: {}, resetsAt: {} } },
+      errors: [{ source: "status", reason: "upstream_unavailable", retryable: true }],
+    }, true);
+  }
+}
 
 function configurationName(collection, id) {
   return collection?.find((item) => item.id === id)?.name || id;
@@ -576,7 +653,7 @@ applySettings.addEventListener("click", async () => {
     configurationDraft = { ...appliedConfiguration };
     saveAppliedConfiguration();
     ready = true;
-    setSettingsOpen(false, settingsTrigger);
+    setSettingsOpen(false);
     setStatus("");
     if (tokenChanged && !state.threadId) await resolvePreTurnConfiguration();
   } catch (error) {
@@ -587,6 +664,7 @@ applySettings.addEventListener("click", async () => {
   } finally {
     setSettingsBusy(false);
     setThreadControls();
+    if (settings.hidden && ready) requestAnimationFrame(() => settingsTrigger.focus());
   }
 });
 
@@ -836,25 +914,8 @@ newThread.addEventListener("click", async () => {
 });
 
 showStatus.addEventListener("click", async () => {
-  if (!ready || activeTurn) return;
-  setStatus("Loading status…");
-  let statusInfo;
-  try {
-    const response = await fetch("/info", { headers: authorization() });
-    if (!response.ok) throw configurationFailure("Status is unavailable. Try again.");
-    statusInfo = await response.json();
-  }
-  catch (error) { setStatus(error.message); return; }
-  const limits = statusInfo.rateLimits || {};
-  setStatus([
-    `Thread: ${state.threadId || "new"}`,
-    `Model: ${appliedConfiguration.model || "default"}`,
-    `Reasoning: ${appliedConfiguration.reasoning || "default"}`,
-    `Permissions: ${appliedConfiguration.permissions || "default"}`,
-    limits.primary && `5h: ${limits.primary.usedPercent}% used`,
-    limits.secondary && `Weekly: ${limits.secondary.usedPercent}% used`,
-    limits.planType && `Plan: ${limits.planType}`,
-  ].filter(Boolean).join(" · "));
+  if (!ready) return;
+  await refreshStatus();
 });
 
 composer.addEventListener("submit", async (event) => {

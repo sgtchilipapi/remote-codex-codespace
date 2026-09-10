@@ -641,6 +641,91 @@ test("an active Turn locks actions, keeps prompt focus, and uses Applied configu
   await expect(prompt).toBeFocused();
 });
 
+test("Show status presents independent effective fields and locally formatted limits", async ({ page }) => {
+  await page.route("**/status", (route) => route.fulfill({ json: {
+    generatedAt: "2026-09-10T12:00:00.000Z",
+    scope: { threadId: null },
+    configuration: {
+      model: { value: "codex-1", observedAt: "2026-09-10T12:00:00.000Z", stale: false },
+      reasoning: { value: "medium", observedAt: "2026-09-10T12:00:00.000Z", stale: false },
+      permissions: { value: "workspace-write", observedAt: "2026-09-10T12:00:00.000Z", stale: false },
+      fastMode: { value: { enabled: true, serviceTier: "priority" }, observedAt: "2026-09-10T12:00:00.000Z", stale: false },
+    },
+    context: { unavailable: true, reason: "not_started" },
+    rateLimits: {
+      fiveHour: { remainingPercent: { value: 73, observedAt: "2026-09-10T12:00:00.000Z", stale: false }, resetsAt: { value: 1789057800, observedAt: "2026-09-10T12:00:00.000Z", stale: false } },
+      weekly: { remainingPercent: { unavailable: true, reason: "not_reported" }, resetsAt: { unavailable: true, reason: "not_reported" } },
+    },
+    errors: [],
+  } }));
+  await openConfiguredClient(page);
+  await page.getByRole("button", { name: "Show status" }).click();
+
+  const liveStatus = page.locator("#status");
+  await expect(liveStatus).toContainText("Model: Codex 1");
+  await expect(liveStatus).toContainText("Reasoning: medium");
+  await expect(liveStatus).toContainText("Permissions: workspace write");
+  await expect(liveStatus).toContainText("Fast mode: On");
+  await expect(liveStatus).toContainText("Context usage: Not started");
+  await expect(liveStatus).toContainText("5-hour: 73% remaining");
+  await expect(liveStatus).toContainText("Weekly: Unavailable remaining · Resets Unavailable");
+  await expect(liveStatus.locator("time")).toHaveAttribute("aria-label", /[A-Z]{2,5}|Coordinated Universal Time|UTC/);
+});
+
+test("Show status refreshes during an active Turn without interrupting it", async ({ page }) => {
+  let statusRequests = 0;
+  await installStreamingTurn(page);
+  await page.route("**/status?*", (route) => { statusRequests += 1; return route.fulfill({ json: {
+    generatedAt: new Date().toISOString(), scope: { threadId: "abc-123" },
+    configuration: { model: { value: "codex-1", observedAt: new Date().toISOString(), stale: false }, reasoning: { unavailable: true, reason: "not_reported" }, permissions: { unavailable: true, reason: "not_reported" }, fastMode: { unavailable: true, reason: "not_reported" } },
+    context: { value: { usedTokens: 50000, windowTokens: 200000, percentage: 25 }, observedAt: new Date().toISOString(), stale: false },
+    rateLimits: { fiveHour: { remainingPercent: { unavailable: true, reason: "not_reported" }, resetsAt: { unavailable: true, reason: "not_reported" } }, weekly: { remainingPercent: { unavailable: true, reason: "not_reported" }, resetsAt: { unavailable: true, reason: "not_reported" } } }, errors: [],
+  } }); });
+  await openConfiguredClient(page);
+  await page.getByLabel("Prompt").fill("Keep working");
+  await page.locator("#composer").evaluate((form) => form.requestSubmit());
+  await expect.poll(() => page.evaluate(() => Boolean(window.__pushTurnEvent))).toBe(true);
+  await page.evaluate(() => window.__pushTurnEvent({ type: "thread.started", thread_id: "abc-123" }));
+
+  await page.getByRole("button", { name: "Show status" }).click();
+  await expect(page.locator("#status")).toContainText("Context usage: 50,000 / 200,000 (25%)");
+  expect(statusRequests).toBe(1);
+  expect(await page.evaluate(() => Boolean(window.__pushTurnEvent))).toBe(true);
+});
+
+test("a failed Status refresh retains values as stale and offers one Retry action", async ({ page }) => {
+  let attempts = 0;
+  await page.route("**/status", (route) => {
+    attempts += 1;
+    if (attempts > 1) return route.fulfill({ status: 502, json: { error: "private detail" } });
+    return route.fulfill({ json: {
+      generatedAt: "2026-09-10T12:00:00.000Z", scope: { threadId: null },
+      configuration: { model: { value: "codex-1", observedAt: "2026-09-10T12:00:00.000Z", stale: false }, reasoning: { unavailable: true, reason: "not_reported" }, permissions: { unavailable: true, reason: "not_reported" }, fastMode: { unavailable: true, reason: "not_reported" } },
+      context: { unavailable: true, reason: "not_started" },
+      rateLimits: { fiveHour: { remainingPercent: { unavailable: true, reason: "not_reported" }, resetsAt: { unavailable: true, reason: "not_reported" } }, weekly: { remainingPercent: { unavailable: true, reason: "not_reported" }, resetsAt: { unavailable: true, reason: "not_reported" } } }, errors: [],
+    } });
+  });
+  await openConfiguredClient(page);
+  await page.getByRole("button", { name: "Show status" }).click();
+  await page.getByRole("button", { name: "Show status" }).click();
+
+  await expect(page.locator("#status")).toContainText("Model: Codex 1");
+  await expect(page.locator("#status")).toContainText("May be outdated");
+  await expect(page.locator("#status")).not.toContainText("private detail");
+  await expect(page.getByRole("button", { name: "Retry status" })).toHaveCount(1);
+});
+
+test("an initial Status failure shows unavailable fields and one Retry action", async ({ page }) => {
+  await page.route("**/status", (route) => route.fulfill({ status: 502, json: { error: "private detail" } }));
+  await openConfiguredClient(page);
+  await page.getByRole("button", { name: "Show status" }).click();
+
+  await expect(page.locator("#status")).toContainText("Model: Unavailable");
+  await expect(page.locator("#status")).toContainText("May be outdated");
+  await expect(page.locator("#status")).not.toContainText("private detail");
+  await expect(page.getByRole("button", { name: "Retry status" })).toHaveCount(1);
+});
+
 test("a failed Turn restores locked actions without stealing prompt focus", async ({ page }) => {
   await installStreamingTurn(page);
   await openConfiguredClient(page);

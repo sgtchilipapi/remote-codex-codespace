@@ -169,6 +169,124 @@ test("resolving another choice does not obsolete a snapshot from the same availa
   assert.equal(appServer.calls.find(({ method }) => method === "turn/start").params.effort, "medium");
 });
 
+test("Status is read-only before a Turn and identifies rate-limit windows by duration", async (t) => {
+  const appServer = fakeAppServer();
+  const originalRequest = appServer.request;
+  appServer.request = async (method, params) => {
+    appServer.calls.push({ method, params });
+    if (method === "model/list") return { data: [{ id: "codex-1", displayName: "Codex 1", isDefault: true, defaultReasoningEffort: "medium", supportedReasoningEfforts: [{ reasoningEffort: "medium" }], serviceTiers: [{ id: "priority", name: "Fast" }], defaultServiceTier: "flex" }] };
+    if (method === "config/read") return { config: { model: "codex-1", model_reasoning_effort: "medium", sandbox_mode: "workspace-write", service_tier: "priority" } };
+    if (method === "account/rateLimits/read") return { rateLimits: {
+      primary: { usedPercent: 30, windowDurationMins: 10080, resetsAt: 1_789_000_000 },
+      secondary: { usedPercent: -5, windowDurationMins: 300, resetsAt: 1_788_000_000 },
+    } };
+    return originalRequest(method, params);
+  };
+  const relay = await serve(appServer); t.after(relay.close);
+  const resolved = await fetch(`${relay.base}/configuration/resolve`, authorized({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: "default", reasoning: "default", permissions: "default", fastMode: "default" }) }));
+  assert.equal(resolved.status, 200);
+
+  const response = await fetch(`${relay.base}/status`, authorized());
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.equal(result.scope.threadId, null);
+  assert.deepEqual(result.configuration.model.value, "codex-1");
+  assert.deepEqual(result.configuration.fastMode.value, { enabled: true, serviceTier: "priority" });
+  assert.deepEqual(result.context, { unavailable: true, reason: "not_started" });
+  assert.equal(result.rateLimits.fiveHour.remainingPercent.value, 100);
+  assert.equal(result.rateLimits.fiveHour.resetsAt.value, 1_788_000_000);
+  assert.equal(result.rateLimits.weekly.remainingPercent.value, 70);
+  assert.equal(appServer.calls.some(({ method }) => method === "thread/start" || method === "thread/resume"), false);
+});
+
+test("Status merges sparse current-Thread notifications and rejects conflicting identities", async (t) => {
+  const appServer = fakeAppServer();
+  appServer.request = async (method, params) => {
+    appServer.calls.push({ method, params });
+    if (method === "thread/read") return { thread: { id: params.threadId, cwd: "/repo", archived: false, source: "appServer", preview: "known" } };
+    if (method === "thread/resume") return { thread: { id: threadId, cwd: "/repo", archived: false, source: "appServer", preview: "known" }, model: "codex-1", reasoningEffort: "medium", serviceTier: "flex", sandbox: { type: "workspaceWrite" }, approvalPolicy: "on-request" };
+    if (method === "thread/turns/list") return { data: [], nextCursor: null };
+    if (method === "account/rateLimits/read") return { rateLimits: { primary: { usedPercent: 20, windowDurationMins: 300, resetsAt: null } } };
+    return {};
+  };
+  const relay = await serve(appServer); t.after(relay.close);
+  assert.equal((await fetch(`${relay.base}/threads/${threadId}/resume`, authorized({ method: "POST" }))).status, 200);
+  emit(appServer, "thread/settings/updated", { threadSettings: { effort: "high", serviceTier: "priority" } });
+  emit(appServer, "thread/tokenUsage/updated", { tokenUsage: { modelContextWindow: 200_000, total: { totalTokens: 900_000 } } });
+  emit(appServer, "thread/tokenUsage/updated", { tokenUsage: { last: { totalTokens: 50_000 } } });
+  appServer.emit("notification", { method: "thread/settings/updated", params: { threadId: "01a086a1-a5fd-7fd1-80d7-a7b607508df4", threadSettings: { model: "wrong-thread" } } });
+
+  const response = await fetch(`${relay.base}/status?threadId=${threadId}`, authorized());
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.equal(result.configuration.model.value, "codex-1");
+  assert.equal(result.configuration.reasoning.value, "high");
+  assert.deepEqual(result.configuration.fastMode.value, { enabled: true, serviceTier: "priority" });
+  assert.deepEqual(result.context.value, { usedTokens: 50_000, windowTokens: 200_000, percentage: 25 });
+  const contextObservedAt = result.context.observedAt;
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  emit(appServer, "thread/tokenUsage/updated", { tokenUsage: { total: { totalTokens: 1_000_000 } } });
+  const afterCumulativeOnlyUpdate = await (await fetch(`${relay.base}/status?threadId=${threadId}`, authorized())).json();
+  assert.equal(afterCumulativeOnlyUpdate.context.observedAt, contextObservedAt);
+  assert.equal((await fetch(`${relay.base}/status?threadId=not-a-uuid`, authorized())).status, 400);
+  assert.equal((await fetch(`${relay.base}/status?threadId=01a086a1-a5fd-7fd1-80d7-a7b607508df4`, authorized())).status, 409);
+});
+
+test("Status keeps confirmed values stale after a refresh failure and clears snapshots on disconnect", async (t) => {
+  const appServer = fakeAppServer(); let failLimits = false;
+  appServer.request = async (method, params) => {
+    appServer.calls.push({ method, params });
+    if (method === "thread/read") return { thread: { id: params.threadId, cwd: "/repo", archived: false, source: "appServer", preview: "known" } };
+    if (method === "thread/resume") return { thread: { id: threadId, cwd: "/repo", archived: false, source: "appServer", preview: "known" }, model: "codex-1" };
+    if (method === "thread/turns/list") return { data: [], nextCursor: null };
+    if (method === "account/rateLimits/read") { if (failLimits) throw new Error("private account detail"); return { rateLimits: { secondary: { usedPercent: 40, windowDurationMins: 10080, resetsAt: 1_789_000_000 } } }; }
+    return {};
+  };
+  const relay = await serve(appServer); t.after(relay.close);
+  await fetch(`${relay.base}/threads/${threadId}/resume`, authorized({ method: "POST" }));
+  await fetch(`${relay.base}/status?threadId=${threadId}`, authorized());
+  failLimits = true;
+
+  const stale = await fetch(`${relay.base}/status?threadId=${threadId}`, authorized());
+  assert.equal(stale.status, 200);
+  const result = await stale.json();
+  assert.equal(result.rateLimits.weekly.remainingPercent.value, 60);
+  assert.equal(result.rateLimits.weekly.remainingPercent.stale, true);
+  assert.deepEqual(result.errors, [{ source: "rate_limits", reason: "upstream_unavailable", retryable: true }]);
+  assert.equal(JSON.stringify(result).includes("private"), false);
+
+  appServer.emit("disconnect", new Error("gone"));
+  assert.equal((await fetch(`${relay.base}/status?threadId=${threadId}`, authorized())).status, 409);
+});
+
+test("Status rejects an empty upstream response when it has no confirmed value", async (t) => {
+  const appServer = fakeAppServer();
+  appServer.request = async (method) => method === "account/rateLimits/read" ? {} : {};
+  const relay = await serve(appServer); t.after(relay.close);
+
+  const response = await fetch(`${relay.base}/status`, authorized());
+  assert.equal(response.status, 502);
+  assert.deepEqual(await response.json(), { error: "Codex unavailable" });
+});
+
+test("a sparse rate-limit notification preserves untouched field freshness", async (t) => {
+  const appServer = fakeAppServer(); let reads = 0;
+  appServer.request = async (method) => method === "account/rateLimits/read" && reads++ === 0 ? { rateLimits: {
+      primary: { usedPercent: 20, windowDurationMins: 300, resetsAt: 1_788_000_000 },
+      secondary: { usedPercent: 40, windowDurationMins: 10080, resetsAt: 1_789_000_000 },
+    } } : {};
+  const relay = await serve(appServer); t.after(relay.close);
+  const first = await (await fetch(`${relay.base}/status`, authorized())).json();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  appServer.emit("notification", { method: "account/rateLimits/updated", params: { rateLimits: { primary: { usedPercent: 25 } } } });
+  const second = await (await fetch(`${relay.base}/status`, authorized())).json();
+
+  assert.equal(second.rateLimits.fiveHour.remainingPercent.value, 75);
+  assert.notEqual(second.rateLimits.fiveHour.remainingPercent.observedAt, first.rateLimits.fiveHour.remainingPercent.observedAt);
+  assert.equal(second.rateLimits.fiveHour.resetsAt.observedAt, first.rateLimits.fiveHour.resetsAt.observedAt);
+  assert.equal(second.rateLimits.weekly.remainingPercent.observedAt, first.rateLimits.weekly.remainingPercent.observedAt);
+});
+
 test("a Turn survives disconnect and replays every missed event once", async (t) => {
   const appServer = fakeAppServer();
   const relay = await serve(appServer); t.after(relay.close);

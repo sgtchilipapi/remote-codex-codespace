@@ -72,6 +72,59 @@ function effectiveConfiguration(resumed) {
     },
   };
 }
+function unavailable(reason) { return { unavailable: true, reason }; }
+function confirmed(value, observedAt, stale = false) { return { value, observedAt, stale }; }
+function mergeObject(previous, update) {
+  if (!update || typeof update !== "object" || Array.isArray(update)) return previous;
+  const merged = { ...(previous || {}) };
+  for (const [key, value] of Object.entries(update)) {
+    merged[key] = value && typeof value === "object" && !Array.isArray(value)
+      ? mergeObject(merged[key], value)
+      : value;
+  }
+  return merged;
+}
+function mergeObservedAt(previous, update, observedAt) {
+  if (!update || typeof update !== "object" || Array.isArray(update)) return observedAt;
+  const merged = { ...(previous && typeof previous === "object" ? previous : {}) };
+  for (const [key, value] of Object.entries(update)) merged[key] = mergeObservedAt(merged[key], value, observedAt);
+  return merged;
+}
+function statusConfiguration(configuration, observedAt, preTurn = false) {
+  const observed = (field) => typeof observedAt === "string" ? observedAt : observedAt?.[field];
+  const permissionValue = preTurn
+    ? configuration?.permissions
+    : configuration?.permissions && Object.values(configuration.permissions).some((value) => value != null) ? configuration.permissions : null;
+  const fastValue = preTurn
+    ? { enabled: Boolean(configuration?.fastMode), serviceTier: configuration?.serviceTier ?? null }
+    : configuration?.fastMode;
+  return {
+    model: configuration?.model != null ? confirmed(configuration.model, observed("model")) : unavailable("not_reported"),
+    reasoning: configuration?.reasoning != null ? confirmed(configuration.reasoning, observed("reasoning")) : unavailable("not_reported"),
+    permissions: permissionValue != null ? confirmed(permissionValue, observed("permissions")) : unavailable("not_reported"),
+    fastMode: fastValue != null ? confirmed(fastValue, observed("fastMode")) : unavailable("not_reported"),
+  };
+}
+function rateLimitStatus(raw, observedAt, stale = false) {
+  const windows = [];
+  const collect = (snapshot, observations) => {
+    if (!snapshot || typeof snapshot !== "object") return;
+    for (const key of ["primary", "secondary"]) if (snapshot[key] && typeof snapshot[key] === "object") windows.push({ value: snapshot[key], observedAt: observations?.[key] });
+  };
+  collect(raw?.rateLimits, observedAt?.rateLimits);
+  for (const [limitId, snapshot] of Object.entries(raw?.rateLimitsByLimitId || {})) collect(snapshot, observedAt?.rateLimitsByLimitId?.[limitId]);
+  const project = (duration) => {
+    const matched = windows.find(({ value }) => value.windowDurationMins === duration);
+    const window = matched?.value;
+    if (!window) return { remainingPercent: unavailable("not_reported"), resetsAt: unavailable("not_reported") };
+    const remaining = Number.isFinite(window.usedPercent) ? Math.min(100, Math.max(0, 100 - window.usedPercent)) : null;
+    return {
+      remainingPercent: remaining == null ? unavailable("not_reported") : confirmed(remaining, matched.observedAt?.usedPercent, stale),
+      resetsAt: window.resetsAt == null ? unavailable("not_reported") : confirmed(window.resetsAt, matched.observedAt?.resetsAt, stale),
+    };
+  };
+  return { fiveHour: project(300), weekly: project(10080) };
+}
 function validateCursor(value, required = false) { if ((required && !value) || (value != null && (typeof value !== "string" || !value || Buffer.byteLength(value) > 4096 || /[\u0000-\u001f\u007f]/.test(value)))) throw new RelayError(400, "Invalid cursor"); }
 const TURN_PERMISSION_POLICIES = {
   "read-only": { sandboxPolicy: { type: "readOnly" }, approvalPolicy: "untrusted" },
@@ -118,8 +171,44 @@ function createRelay({ appServer, env = process.env, turnRetentionMs = TURN_RETE
   if (!Number.isSafeInteger(maxBufferedBytes) || maxBufferedBytes < CONTROL_EVENT_RESERVE_BYTES) throw new Error(`maxBufferedBytes must be at least ${CONTROL_EVENT_RESERVE_BYTES}`);
   if (!Number.isSafeInteger(maxSubscribersPerTurn) || maxSubscribersPerTurn < 1) throw new Error("maxSubscribersPerTurn must be positive");
   if (!Number.isSafeInteger(maxRetainedTurns) || maxRetainedTurns < 1) throw new Error("maxRetainedTurns must be positive");
-  const app = express(); const workdir = env.CODESPACE_WORKDIR || "/workspaces/remote-codex-codespace"; const run = createRun(env); const codex = appServer || new AppServerConnection({ run }); const turns = new Map(); const configurationRevisions = new Map(); let currentAvailabilityRevision = null; app.locals.appServer = codex;
-  codex.on?.("disconnect", () => { configurationRevisions.clear(); currentAvailabilityRevision = null; });
+  const app = express(); const workdir = env.CODESPACE_WORKDIR || "/workspaces/remote-codex-codespace"; const run = createRun(env); const codex = appServer || new AppServerConnection({ run }); const turns = new Map(); const configurationRevisions = new Map(); const threadSnapshots = new Map(); let currentAvailabilityRevision = null; let selectedThreadId = null; let preTurnSnapshot = null; let accountSnapshot = null; app.locals.appServer = codex;
+  const onRelayNotification = ({ method, params = {} }) => {
+    const observedAt = new Date().toISOString();
+    if (method === "account/rateLimits/updated") {
+      accountSnapshot = { value: mergeObject(accountSnapshot?.value, params), observedAt: mergeObservedAt(accountSnapshot?.observedAt, params, observedAt) };
+      return;
+    }
+    if (!selectedThreadId || params.threadId !== selectedThreadId) return;
+    const snapshot = threadSnapshots.get(selectedThreadId) || {};
+    if (method === "thread/settings/updated") {
+      const settings = params.threadSettings || {};
+      const update = {};
+      if (Object.hasOwn(settings, "model")) update.model = settings.model;
+      if (Object.hasOwn(settings, "effort")) update.reasoning = settings.effort;
+      if (Object.hasOwn(settings, "sandboxPolicy")) update.permissions = { ...(snapshot.configuration?.permissions || {}), sandboxPolicy: settings.sandboxPolicy };
+      if (Object.hasOwn(settings, "approvalPolicy")) update.permissions = { ...(update.permissions || snapshot.configuration?.permissions || {}), approvalPolicy: settings.approvalPolicy };
+      if (Object.hasOwn(settings, "activePermissionProfile")) update.permissions = { ...(update.permissions || snapshot.configuration?.permissions || {}), profile: settings.activePermissionProfile };
+      if (Object.hasOwn(settings, "serviceTier")) update.fastMode = settings.serviceTier == null ? null : { enabled: settings.serviceTier === "priority" ? true : null, serviceTier: settings.serviceTier };
+      snapshot.configuration = { ...(snapshot.configuration || {}), ...update };
+      snapshot.configurationObservedAt = { ...(snapshot.configurationObservedAt || {}) };
+      for (const field of Object.keys(update)) snapshot.configurationObservedAt[field] = observedAt;
+    }
+    if (method === "thread/tokenUsage/updated") {
+      const tokenUsageUpdate = params.tokenUsage || {};
+      const refreshesContext = Object.hasOwn(tokenUsageUpdate, "modelContextWindow") || Object.hasOwn(tokenUsageUpdate.last || {}, "totalTokens");
+      snapshot.tokenUsage = mergeObject(snapshot.tokenUsage, tokenUsageUpdate);
+      const usage = snapshot.tokenUsage;
+      const usedTokens = usage.last?.totalTokens;
+      const windowTokens = usage.modelContextWindow;
+      if (refreshesContext && Number.isFinite(usedTokens) && Number.isFinite(windowTokens) && windowTokens > 0) {
+        snapshot.context = { usedTokens, windowTokens, percentage: Math.min(100, Math.max(0, usedTokens / windowTokens * 100)) };
+        snapshot.contextObservedAt = observedAt;
+      }
+    }
+    threadSnapshots.set(selectedThreadId, snapshot);
+  };
+  codex.on?.("notification", onRelayNotification);
+  codex.on?.("disconnect", () => { configurationRevisions.clear(); threadSnapshots.clear(); currentAvailabilityRevision = null; selectedThreadId = null; preTurnSnapshot = null; accountSnapshot = null; });
   app.use(express.json()); app.use(express.static("public"));
   const authorize = (req, res, next) => { if (!env.API_TOKEN || req.get("authorization") !== `Bearer ${env.API_TOKEN}`) return res.status(401).json({ error: "Unauthorized" }); next(); };
   const route = (handler) => async (req, res) => { try { await handler(req, res); } catch (error) { const status = error.status || 502; const message = [400, 404, 409, 429].includes(status) ? error.message : status === 503 ? "Relay capacity unavailable" : status === 504 ? "Codex timed out" : "Codex unavailable"; if (!res.headersSent) res.status(status).json({ error: message }); else res.end(`${JSON.stringify({ type: "error", message })}\n`); } };
@@ -144,13 +233,47 @@ function createRelay({ appServer, env = process.env, turnRetentionMs = TURN_RETE
     currentAvailabilityRevision = availabilityRevision;
     configurationRevisions.set(configurationRevision, { availabilityRevision, resolved });
     while (configurationRevisions.size > 32) configurationRevisions.delete(configurationRevisions.keys().next().value);
+    selectedThreadId = null;
+    preTurnSnapshot = { configuration: resolved, observedAt: new Date().toISOString() };
     res.json({ configuration: resolved, configurationRevision });
+  }));
+  app.get("/status", authorize, route(async (req, res) => {
+    const requestedThreadId = req.query.threadId;
+    if (requestedThreadId != null && !UUID.test(requestedThreadId)) throw new RelayError(400, "Invalid Thread ID");
+    if (requestedThreadId && requestedThreadId !== selectedThreadId) {
+      await readEligible(requestedThreadId);
+      throw new RelayError(409, "Thread is not current");
+    }
+    const errors = [];
+    try {
+      const refreshed = await codex.request("account/rateLimits/read", {});
+      const observedAt = new Date().toISOString();
+      accountSnapshot = { value: mergeObject(accountSnapshot?.value, refreshed), observedAt: mergeObservedAt(accountSnapshot?.observedAt, refreshed, observedAt) };
+    } catch {
+      errors.push({ source: "rate_limits", reason: "upstream_unavailable", retryable: true });
+    }
+    const generatedAt = new Date().toISOString();
+    const threadSnapshot = requestedThreadId ? threadSnapshots.get(requestedThreadId) : null;
+    const projectedRates = accountSnapshot ? rateLimitStatus(accountSnapshot.value, accountSnapshot.observedAt, errors.length > 0) : null;
+    const hasConfirmedRate = projectedRates && Object.values(projectedRates).some((window) => Object.values(window).some((field) => Object.hasOwn(field, "value")));
+    const hasStatusSnapshot = Boolean(threadSnapshot?.configuration || preTurnSnapshot?.configuration || hasConfirmedRate);
+    if (!hasStatusSnapshot) throw new RelayError(502, "Codex unavailable");
+    const configuration = requestedThreadId
+      ? statusConfiguration(threadSnapshot?.configuration, threadSnapshot?.configurationObservedAt)
+      : statusConfiguration(preTurnSnapshot?.configuration, preTurnSnapshot?.observedAt, true);
+    const context = requestedThreadId
+      ? threadSnapshot?.context ? confirmed(threadSnapshot.context, threadSnapshot.contextObservedAt) : unavailable("not_reported")
+      : unavailable("not_started");
+    const rates = projectedRates
+      ? projectedRates
+      : { fiveHour: { remainingPercent: unavailable("upstream_unavailable"), resetsAt: unavailable("upstream_unavailable") }, weekly: { remainingPercent: unavailable("upstream_unavailable"), resetsAt: unavailable("upstream_unavailable") } };
+    res.json({ generatedAt, scope: { threadId: requestedThreadId || null }, configuration, context, rateLimits: rates, errors });
   }));
   app.get("/info", authorize, route(async (_req, res) => { const [models, limits] = await Promise.all([codex.request("model/list", { limit: 100 }), codex.request("account/rateLimits/read", {})]); res.json({ models: models.data.map((item) => ({ id: item.id, name: item.displayName, isDefault: item.isDefault, defaultReasoning: item.defaultReasoningEffort, reasoning: item.supportedReasoningEfforts.map(({ reasoningEffort }) => reasoningEffort) })), rateLimits: limits.rateLimits }); }));
   app.get("/threads", authorize, route(async (req, res) => { validateCursor(req.query.cursor); if (req.query.currentThreadId && !UUID.test(req.query.currentThreadId)) throw new RelayError(400, "Invalid Thread ID"); const params = { archived: false, cwd: workdir, limit: 20, sortDirection: "desc", sortKey: "recency_at", sourceKinds: ELIGIBLE_SOURCE_KINDS }; if (req.query.cursor) params.cursor = req.query.cursor; const result = await codex.request("thread/list", params); res.json({ threads: result.data.filter((thread) => eligible(thread, workdir)).map((thread) => publicThread(thread, req.query.currentThreadId)), nextCursor: result.nextCursor || null }); }));
   async function readEligible(threadId) { const result = await codex.request("thread/read", { threadId, includeTurns: false }); if (!eligible(result.thread, workdir)) throw new RelayError(404, "Thread not found"); return result.thread; }
   const hasActiveTurn = () => [...turns.values()].some((turn) => turn.status === "running");
-  app.post("/threads/:id/resume", authorize, route(async (req, res) => { if (!UUID.test(req.params.id)) throw new RelayError(400, "Invalid Thread ID"); if (hasActiveTurn()) throw new RelayError(409, "A Turn is active"); await readEligible(req.params.id); const resumed = await codex.request("thread/resume", { threadId: req.params.id, excludeTurns: true }); if (!eligible(resumed.thread, workdir)) throw new RelayError(404, "Thread not found"); const history = await codex.request("thread/turns/list", { threadId: req.params.id, cursor: null, limit: 20, sortDirection: "desc", itemsView: "full" }); res.json({ thread: { id: resumed.thread.id }, effectiveConfiguration: effectiveConfiguration(resumed), messages: normalizeItems(history.data || [], null), olderCursor: history.nextCursor || null }); }));
+  app.post("/threads/:id/resume", authorize, route(async (req, res) => { if (!UUID.test(req.params.id)) throw new RelayError(400, "Invalid Thread ID"); if (hasActiveTurn()) throw new RelayError(409, "A Turn is active"); await readEligible(req.params.id); const resumed = await codex.request("thread/resume", { threadId: req.params.id, excludeTurns: true }); if (!eligible(resumed.thread, workdir)) throw new RelayError(404, "Thread not found"); const history = await codex.request("thread/turns/list", { threadId: req.params.id, cursor: null, limit: 20, sortDirection: "desc", itemsView: "full" }); const effective = effectiveConfiguration(resumed); const observedAt = new Date().toISOString(); selectedThreadId = resumed.thread.id; threadSnapshots.clear(); threadSnapshots.set(selectedThreadId, { configuration: effective, configurationObservedAt: { model: observedAt, reasoning: observedAt, permissions: observedAt, fastMode: observedAt } }); res.json({ thread: { id: resumed.thread.id }, effectiveConfiguration: effective, messages: normalizeItems(history.data || [], null), olderCursor: history.nextCursor || null }); }));
   app.get("/threads/:id/history", authorize, route(async (req, res) => { if (!UUID.test(req.params.id)) throw new RelayError(400, "Invalid Thread ID"); validateCursor(req.query.cursor, true); await readEligible(req.params.id); const history = await codex.request("thread/turns/list", { threadId: req.params.id, cursor: req.query.cursor, limit: 20, sortDirection: "desc", itemsView: "full" }); res.json({ messages: normalizeItems(history.data || [], req.query.anchorId), olderCursor: history.nextCursor || null }); }));
   app.get("/test", authorize, (_req, res) => { const child = run("hostname && pwd"); let stdout = ""; child.stdout.on("data", (chunk) => { stdout += chunk; }); child.on("error", () => { if (!res.headersSent) res.status(502).json({ error: "Codespace unavailable" }); }); child.on("close", (code) => { if (res.headersSent) return; if (code !== 0) return res.status(502).json({ error: "Codespace unavailable" }); res.type("text/plain").send(stdout); }); child.stdin.end(); });
   function appendTurnEvent(turn, event, control = false) {
@@ -192,8 +315,13 @@ function createRelay({ appServer, env = process.env, turnRetentionMs = TURN_RETE
   }
   async function startOwnedTurn(turn, request) {
     try {
-      if (request.threadId) { await codex.request("thread/resume", { threadId: request.threadId, excludeTurns: true }); turn.threadId = request.threadId; }
-      else { const params = { cwd: workdir }; if (request.model) params.model = request.model; if (request.reasoning && !request.configurationRevision) params.effort = request.reasoning; if (request.permissions) params.sandbox = request.permissions; turn.threadId = (await codex.request("thread/start", params)).thread.id; }
+      let opened;
+      if (request.threadId) { opened = await codex.request("thread/resume", { threadId: request.threadId, excludeTurns: true }); turn.threadId = request.threadId; }
+      else { const params = { cwd: workdir }; if (request.model) params.model = request.model; if (request.reasoning && !request.configurationRevision) params.effort = request.reasoning; if (request.permissions) params.sandbox = request.permissions; opened = await codex.request("thread/start", params); turn.threadId = opened.thread.id; }
+      selectedThreadId = turn.threadId;
+      const observedAt = new Date().toISOString();
+      threadSnapshots.clear();
+      threadSnapshots.set(turn.threadId, { configuration: effectiveConfiguration(opened), configurationObservedAt: { model: observedAt, reasoning: observedAt, permissions: observedAt, fastMode: observedAt } });
       publishTurnEvent(turn, { type: "thread.started", thread_id: turn.threadId });
       const params = { threadId: turn.threadId, input: [{ type: "text", text: request.prompt }] }; if (request.threadId && request.model) params.model = request.model; if (request.threadId && request.reasoning) params.effort = request.reasoning;
       if (!request.threadId && request.configurationRevision && request.reasoning) params.effort = request.reasoning;

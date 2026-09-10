@@ -35,6 +35,7 @@ An implementation-ready specification that resolves every finding in [`responsiv
 - [Resume Eligible Threads with canonical effective state](tickets/11-resume-eligible-threads-with-effective-state.md): Filter listing and revalidation to allowed sources, and atomically install canonical ID-bearing history with only Codex-reported effective settings.
 - [Render item-owned assistant and Activity bubbles](tickets/12-render-item-owned-assistant-and-activity-bubbles.md): Preserve item identity across live and replayed events, render immutable per-item assistant and error bubbles, and expose only normalized transient Activity categories while retaining reader position.
 - [Rehydrate persisted Thread and local-New views safely](tickets/13-rehydrate-persisted-thread-views.md): Lock persisted Thread reloads through canonical revalidation, preserve untouched local New views, and recover unavailable Threads to a resolved local view without starting Codex.
+- [Expose and present effective Status end to end](tickets/14-expose-and-present-effective-status.md): Carry scoped pre-Turn and Codex-confirmed snapshots through a read-only Status route, with live context, duration-matched limits, independent freshness, local reset formatting, and retryable stale presentation during active Turns.
 
 ## Not yet specified
 
@@ -50,5 +51,4 @@ None.
 
 ## Open child tickets
 
-1. [Expose and present effective Status end to end](tickets/14-expose-and-present-effective-status.md)
-2. [Retire the compatibility facade and enforce the release matrix](tickets/15-retire-info-and-enforce-release-matrix.md)
+1. [Retire the compatibility facade and enforce the release matrix](tickets/15-retire-info-and-enforce-release-matrix.md)

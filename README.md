@@ -9,7 +9,7 @@ A minimal mobile web UI for controlling Codex in one existing GitHub Codespace t
 - `API_TOKEN`: secret entered in the mobile UI
 - `CODESPACE_WORKDIR`: repository path inside the Codespace (optional; defaults to `/workspaces/remote-codex-codespace`)
 
-Deploy the repository to Railway, open its public URL on your phone, enter `API_TOKEN`, and send a prompt. The model and its supported reasoning levels come from Codex inside the Codespace. The browser retains the active Codex Thread, displayed messages, model, reasoning effort, and permissions in local storage. **New** starts another Thread; **Resume** lists recent interactive Threads from the configured Codespace working directory; **Status** shows the current selections, Thread ID, plan, and live usage limits. Cached Threads are revalidated against Codex persistence when the Mobile Client reloads.
+Deploy the repository to Railway, open its public URL on your phone, enter `API_TOKEN`, and send a prompt. The model and its supported reasoning levels come from Codex inside the Codespace. The browser retains the active Codex Thread, displayed messages, model, reasoning effort, and permissions in local storage. **New** prepares a local Thread view; **Resume** lists recent interactive Threads from the configured Codespace working directory; **Status** shows concrete pre-Turn or Codex-confirmed configuration, context occupancy, and duration-matched usage limits with local reset times and freshness. Cached Threads are revalidated against Codex persistence when the Mobile Client reloads.
 
 To verify SSH independently:
 

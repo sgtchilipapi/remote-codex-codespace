@@ -213,12 +213,18 @@ main.settings-open #resume-picker { display: none; }
 .message code { white-space: inherit; }
 
 #status {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
   flex: 0 0 auto;
   min-width: 0;
   min-height: 1.2em;
   overflow-wrap: anywhere;
   color: var(--muted);
 }
+.status-details { flex: 1 1 auto; min-width: 0; }
+.status-warning { color: var(--danger); }
+.status-retry { flex: 0 0 auto; min-height: 44px; }
 
 #composer { flex: 0 0 auto; align-items: flex-end; min-width: 0; }
 
