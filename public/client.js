@@ -130,9 +130,9 @@ function setThreadControls() {
   const focusedView = !settings.hidden || !configuration.hidden || !resumePicker.hidden;
   newThread.disabled = locked || !ready || focusedView;
   resumeThread.disabled = locked || !ready || focusedView;
-  showStatus.disabled = locked || !ready;
+  showStatus.disabled = checking || hydrating || !ready;
   configure.disabled = locked || !ready || !settings.hidden || !resumePicker.hidden;
-  settingsTrigger.disabled = activeTurn || checking;
+  settingsTrigger.disabled = activeTurn || checking || hydrating;
   send.disabled = activeTurn || !ready || focusedView;
   prompt.disabled = !ready || focusedView;
 }
@@ -476,6 +476,8 @@ applySettings.addEventListener("click", async () => {
     setStatus("");
   } catch (error) {
     appliedConfiguration = previousConfiguration;
+    tokenDraft = previousConfiguration?.token || "";
+    token.value = tokenDraft;
     showSettingsError(error.message);
   } finally {
     setSettingsBusy(false);

@@ -136,6 +136,7 @@ test("startup checking locks every Thread entry action until live availability l
   await expect(page.getByRole("button", { name: "New" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Configure" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Send" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Show status" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Resume" })).toBeDisabled();
   await expect(page.getByLabel("Prompt")).toBeDisabled();
   await expect(page.getByRole("status")).toContainText("Checking Settings");
@@ -234,7 +235,7 @@ test("Cancel discards a later Settings token draft", async ({ page }) => {
   expect(await page.evaluate(() => JSON.parse(localStorage.relayConfiguration))).toEqual(appliedConfiguration);
 });
 
-test("failed token replacement preserves its draft and all authenticated state", async ({ page }) => {
+test("failed token replacement restores its committed token and authenticated state", async ({ page }) => {
   let requestCount = 0;
   await page.addInitScript((configuration) => {
     localStorage.setItem("relayConfiguration", JSON.stringify(configuration));
@@ -254,10 +255,82 @@ test("failed token replacement preserves its draft and all authenticated state",
   await expect(error).toBeFocused();
   await expect(error).toContainText("rejected");
   await expect(error).not.toContainText("secret-rejected-token");
-  await expect(page.getByLabel("API token")).toHaveValue("secret-rejected-token");
+  await expect(page.getByLabel("API token")).toHaveValue("valid-token");
   await expect(page.getByLabel("API token")).toHaveAttribute("aria-invalid", "true");
   await expect(page.locator("#token-error")).toContainText("rejected");
   expect(await page.evaluate(() => JSON.parse(localStorage.relayConfiguration))).toEqual(appliedConfiguration);
+});
+
+for (const [name, responseStatus, expected] of [
+  ["upstream unavailability", 502, "unavailable"],
+  ["an unexpected response", 500, "could not be checked"],
+]) {
+  test(`failed Settings validation handles ${name} without changing authenticated state`, async ({ page }) => {
+    let requestCount = 0;
+    await page.addInitScript((configuration) => {
+      localStorage.setItem("relayConfiguration", JSON.stringify(configuration));
+    }, appliedConfiguration);
+    await page.route("**/info", (route) => {
+      requestCount += 1;
+      if (requestCount === 1) return route.fulfill({ json: modelInfo });
+      return route.fulfill({ status: responseStatus, json: { error: "private detail" } });
+    });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Settings" }).click();
+    await page.getByLabel("API token").fill("rejected-draft");
+    await page.getByRole("button", { name: "Save and connect" }).click();
+
+    await expect(page.getByRole("alert")).toContainText(expected);
+    await expect(page.getByRole("alert")).not.toContainText("private detail");
+    await expect(page.getByLabel("API token")).toHaveValue("valid-token");
+    expect(await page.evaluate(() => JSON.parse(localStorage.relayConfiguration))).toEqual(appliedConfiguration);
+  });
+}
+
+test("failed Settings validation handles a network failure without changing authenticated state", async ({ page }) => {
+  let requestCount = 0;
+  await page.addInitScript((configuration) => {
+    localStorage.setItem("relayConfiguration", JSON.stringify(configuration));
+  }, appliedConfiguration);
+  await page.route("**/info", (route) => {
+    requestCount += 1;
+    return requestCount === 1 ? route.fulfill({ json: modelInfo }) : route.abort("failed");
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByLabel("API token").fill("rejected-draft");
+  await page.getByRole("button", { name: "Save and connect" }).click();
+
+  await expect(page.getByRole("alert")).toContainText("unavailable");
+  await expect(page.getByLabel("API token")).toHaveValue("valid-token");
+  expect(await page.evaluate(() => JSON.parse(localStorage.relayConfiguration))).toEqual(appliedConfiguration);
+});
+
+test("Configuration retains field validation after authentication moves to Settings", async ({ page }) => {
+  await openConfiguredClient(page);
+  await page.getByRole("button", { name: "Configure" }).click();
+  await page.getByLabel("Permissions").evaluate((select) => {
+    select.add(new Option("dangerous", "dangerous"));
+    select.value = "dangerous";
+  });
+  await page.getByRole("button", { name: "Apply and close" }).click();
+
+  await expect(page.getByLabel("Permissions")).toHaveAttribute("aria-invalid", "true");
+  await expect(page.locator("#permissions-error")).toContainText("permissions are invalid");
+  expect(await page.evaluate(() => JSON.parse(localStorage.relayConfiguration))).toEqual(appliedConfiguration);
+});
+
+test("Configuration still normalizes reasoning when its model changes", async ({ page }) => {
+  await page.addInitScript((configuration) => {
+    localStorage.setItem("relayConfiguration", JSON.stringify(configuration));
+  }, { token: "valid-token", model: "codex-1", reasoning: "high", permissions: "read-only" });
+  await page.route("**/info", (route) => route.fulfill({ json: modelInfo }));
+  await page.goto("/");
+  await page.getByRole("button", { name: "Configure" }).click();
+  await page.getByLabel("Model", { exact: true }).selectOption("codex-mini");
+
+  await expect(page.getByLabel("Reasoning effort")).toHaveValue("");
+  await expect(page.getByLabel("Permissions")).toHaveValue("read-only");
 });
 
 test("an active Turn locks actions, keeps prompt focus, and uses Applied configuration", async ({ page }) => {
@@ -271,6 +344,7 @@ test("an active Turn locks actions, keeps prompt focus, and uses Applied configu
   await expect(page.getByRole("button", { name: "New" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Configure" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Send" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Show status" })).toBeEnabled();
   await expect(prompt).toBeEnabled();
   await expect(prompt).toBeFocused();
   await expect.poll(() => page.evaluate(() => window.__turnRequest)).toEqual(expect.objectContaining({
