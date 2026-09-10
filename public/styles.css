@@ -100,11 +100,13 @@ button:disabled, input:disabled, select:disabled, textarea:disabled { opacity: .
 #configuration[hidden], #settings[hidden] { display: none; }
 #resume-picker[hidden] { display: none; }
 main.resume-open #messages,
+main.resume-open #pre-turn-configuration,
 main.resume-open #status,
 main.resume-open #composer,
 main.resume-open #configuration { display: none; }
 
 main.settings-open #messages,
+main.settings-open #pre-turn-configuration,
 main.settings-open #status,
 main.settings-open #composer,
 main.settings-open #configuration,
@@ -116,6 +118,14 @@ main.settings-open #resume-picker { display: none; }
   overflow-y: auto;
   padding: 16px;
   border-radius: 10px;
+  background: var(--surface);
+}
+
+#pre-turn-configuration {
+  flex: 0 0 auto;
+  padding: 10px 12px;
+  border-radius: 8px;
+  color: var(--muted);
   background: var(--surface);
 }
 .resume-heading-row { display: flex; align-items: center; gap: 8px; }

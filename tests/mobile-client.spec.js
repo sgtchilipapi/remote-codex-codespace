@@ -56,6 +56,9 @@ async function installStreamingTurn(page) {
     let sequence = 0;
     window.fetch = async (input, init) => {
       const url = new URL(input, location.href);
+      if (url.pathname === "/configuration/resolve") {
+        return Response.json({ configuration: { model: "codex-1", reasoning: "medium", permissions: "workspace-write", fastMode: false, serviceTier: null }, configurationRevision: "stream-revision" });
+      }
       if (url.pathname === "/turn") {
         window.__turnRequest = JSON.parse(init.body);
         return Response.json({ turnId: window.__turnRequest.turnId, eventsUrl: `/turn/${window.__turnRequest.turnId}/events` }, { status: 202 });
@@ -120,6 +123,67 @@ test("selecting an Eligible Thread atomically installs history without starting 
   await expect(page.getByLabel("Prompt")).toBeFocused();
   expect(turnRequests).toBe(0);
   expect(await page.evaluate(() => JSON.parse(localStorage.relay).threadId)).toBe(resumableThreadId);
+});
+
+test("New resolves and announces a concrete local configuration without creating a Thread", async ({ page }) => {
+  const mutations = [];
+  await page.route("**/configuration/resolve", async (route) => {
+    mutations.push(JSON.parse(route.request().postData()));
+    await route.fulfill({ json: { configuration: { model: "codex-1", reasoning: "medium", permissions: "workspace-write", fastMode: false, serviceTier: null }, configurationRevision: "new-revision" } });
+  });
+  await page.route("**/threads/*/resume", (route) => { mutations.push("resume"); return route.abort(); });
+  await page.route("**/turn", (route) => { mutations.push("turn"); return route.abort(); });
+  await openConfiguredClient(page);
+
+  await page.getByRole("button", { name: "New" }).click();
+
+  await expect(page.getByLabel("Prompt")).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Configure" })).toBeEnabled();
+  await expect(page.getByRole("status", { name: "Pre-Turn configuration" })).toHaveText("Model: Codex 1 · Reasoning: medium · Permissions: workspace write · Fast mode: Off");
+  expect(mutations).toEqual([{ model: "default", reasoning: "default", permissions: "default", fastMode: "default" }]);
+  expect(await page.evaluate(() => JSON.parse(localStorage.relay).preTurnConfiguration)).toEqual({
+    configuration: { model: "codex-1", reasoning: "medium", permissions: "workspace-write", fastMode: false, serviceTier: null },
+    configurationRevision: "new-revision",
+  });
+});
+
+test("an untouched local New view and its concrete announcement survive reload", async ({ page }) => {
+  await page.addInitScript(({ configuration, preTurnConfiguration }) => {
+    localStorage.setItem("relayConfiguration", JSON.stringify(configuration));
+    localStorage.setItem("relay", JSON.stringify({ threadId: null, messages: [], localNew: true, preTurnConfiguration }));
+  }, {
+    configuration: appliedConfiguration,
+    preTurnConfiguration: { configuration: { model: "codex-1", reasoning: "medium", permissions: "workspace-write", fastMode: false, serviceTier: null }, configurationRevision: "persisted-revision" },
+  });
+  await page.route("**/configuration", (route) => route.fulfill({ json: modelInfo }));
+  await page.goto("/");
+
+  await expect(page.getByLabel("Prompt")).toBeEnabled();
+  await expect(page.getByRole("status", { name: "Pre-Turn configuration" })).toContainText("Model: Codex 1");
+  expect(await page.evaluate(() => JSON.parse(localStorage.relay).preTurnConfiguration.configurationRevision)).toBe("persisted-revision");
+});
+
+test("the first local Turn retries an obsolete revision with a newly resolved snapshot", async ({ page }) => {
+  await installStreamingTurn(page);
+  await openConfiguredClient(page);
+  await page.evaluate(() => {
+    const originalFetch = window.fetch;
+    window.__turnAttempts = 0;
+    window.fetch = async (input, init) => {
+      const url = new URL(input, location.href);
+      if (url.pathname === "/turn" && window.__turnAttempts++ === 0) return Response.json({ error: "Configuration revision is obsolete" }, { status: 409 });
+      return originalFetch(input, init);
+    };
+  });
+  await page.getByRole("button", { name: "New" }).click();
+  await page.getByLabel("Prompt").fill("Start safely");
+  await page.locator("#composer").evaluate((form) => form.requestSubmit());
+
+  await expect.poll(() => page.evaluate(() => window.__turnAttempts)).toBe(2);
+  await expect.poll(() => page.evaluate(() => window.__turnRequest.configurationRevision)).toBe("stream-revision");
+  await expect(page.getByRole("status", { name: "Pre-Turn configuration" })).toBeVisible();
+  await page.evaluate(() => window.__pushTurnEvent({ type: "thread.started", thread_id: "abc-123" }));
+  await expect(page.getByRole("status", { name: "Pre-Turn configuration" })).toBeHidden();
 });
 
 test("startup checking locks every Thread entry action until live availability loads", async ({ page }) => {

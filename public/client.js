@@ -36,6 +36,7 @@ const permissionsError = document.querySelector("#permissions-error");
 const fastMode = document.querySelector("#fast-mode");
 const fastModeHint = document.querySelector("#fast-mode-hint");
 const fastModeError = document.querySelector("#fast-mode-error");
+const preTurnAnnouncement = document.querySelector("#pre-turn-configuration");
 const messages = document.querySelector("#messages");
 const loadOlderHistory = document.querySelector("#load-older-history");
 const status = document.querySelector("#status");
@@ -108,6 +109,49 @@ function saveAppliedConfiguration() {
 }
 
 function setStatus(message) { status.textContent = message; }
+
+function configurationName(collection, id) {
+  return collection?.find((item) => item.id === id)?.name || id;
+}
+
+function renderPreTurnConfiguration() {
+  const resolved = state.localNew && state.preTurnConfiguration?.configuration;
+  preTurnAnnouncement.hidden = !resolved;
+  if (!resolved) {
+    preTurnAnnouncement.textContent = "";
+    return;
+  }
+  const announcement = [
+    `Model: ${configurationName(configurationCatalog?.models, resolved.model)}`,
+    `Reasoning: ${resolved.reasoning}`,
+    `Permissions: ${configurationName(configurationCatalog?.permissions, resolved.permissions)}`,
+    `Fast mode: ${resolved.fastMode ? "On" : "Off"}`,
+  ].join(" · ");
+  if (preTurnAnnouncement.textContent !== announcement) preTurnAnnouncement.textContent = announcement;
+}
+
+function resolutionRequest(candidate) {
+  return {
+    model: candidate.model || "default",
+    reasoning: candidate.reasoning || "default",
+    permissions: candidate.permissions || "default",
+    fastMode: candidate.fastMode == null ? "default" : candidate.fastMode,
+  };
+}
+
+async function resolvePreTurnConfiguration() {
+  const response = await fetch("/configuration/resolve", {
+    method: "POST",
+    headers: { ...authorization(), "Content-Type": "application/json" },
+    body: JSON.stringify(resolutionRequest(appliedConfiguration)),
+  });
+  if (!response.ok) throw await responseError(response);
+  const resolved = await response.json();
+  state.preTurnConfiguration = resolved;
+  saveState();
+  renderPreTurnConfiguration();
+  return resolved;
+}
 
 function setConfigurationOpen(open, focusTarget = null) {
   configuration.hidden = !open;
@@ -195,7 +239,7 @@ async function selectThread(id, row) {
   hydrating = true; setThreadControls(); for (const button of resumeResults.querySelectorAll("button")) button.disabled = true; resumeStatus.textContent = "Loading Thread…"; resumeError.hidden = true;
   try {
     const response = await fetch(`/threads/${id}/resume`, { method: "POST", headers: authorization() }); if (!response.ok) throw new Error(response.status === 404 ? "That Thread is no longer available." : "Thread could not be resumed. Try again.");
-    const result = await response.json(); state = { threadId: result.thread.id, messages: result.messages }; olderCursor = result.olderCursor; persistedThreadConfiguration = true; saveState(); followThread = true; drawMessages({ forceFollow: true });
+    const result = await response.json(); state = { threadId: result.thread.id, messages: result.messages }; olderCursor = result.olderCursor; persistedThreadConfiguration = true; saveState(); followThread = true; renderPreTurnConfiguration(); drawMessages({ forceFollow: true });
     setResumeOpen(false); requestAnimationFrame(() => prompt.focus()); setStatus(result.thread.model ? `Resumed · ${result.thread.model}` : "Resumed");
   } catch (error) { displayResumeError(error.message); if (/no longer/.test(error.message)) row.remove(); }
   finally { hydrating = false; setThreadControls(); for (const button of resumeResults.querySelectorAll("button")) button.disabled = button.textContent.includes("Current"); }
@@ -411,6 +455,7 @@ async function checkPersistedConfiguration() {
     const changed = JSON.stringify(normalized) !== JSON.stringify(appliedConfiguration);
     appliedConfiguration = normalized;
     configurationDraft = { ...normalized };
+    renderPreTurnConfiguration();
     if (changed) {
       saveAppliedConfiguration();
       setStatus("Configuration checked; unavailable model choices were reset to Default.");
@@ -439,7 +484,7 @@ async function revalidateCachedThread() {
   try {
     const response = await fetch(`/threads/${state.threadId}/resume`, { method: "POST", headers: authorization() });
     if (!response.ok) throw new Error();
-    const result = await response.json(); state = { threadId: result.thread.id, messages: result.messages }; olderCursor = result.olderCursor; persistedThreadConfiguration = true; saveState(); drawMessages({ forceFollow: true }); setStatus("");
+    const result = await response.json(); state = { threadId: result.thread.id, messages: result.messages }; olderCursor = result.olderCursor; persistedThreadConfiguration = true; saveState(); renderPreTurnConfiguration(); drawMessages({ forceFollow: true }); setStatus("");
   } catch {
     state = { threadId: null, messages: [] }; olderCursor = null; persistedThreadConfiguration = false; saveState(); drawMessages({ forceFollow: true }); setStatus("The saved Thread is unavailable; started a new Thread.");
   } finally { hydrating = false; setThreadControls(); }
@@ -494,11 +539,18 @@ applySettings.addEventListener("click", async () => {
     appliedConfiguration = tokenChanged
       ? { token: tokenDraft, model: "", reasoning: "", permissions: "", fastMode: null }
       : normalizeConfiguration(previousConfiguration, checkedCatalog);
+    if (tokenChanged && !state.threadId) {
+      state.localNew = true;
+      state.preTurnConfiguration = null;
+      saveState();
+      renderPreTurnConfiguration();
+    }
     configurationDraft = { ...appliedConfiguration };
     saveAppliedConfiguration();
     ready = true;
     setSettingsOpen(false, settingsTrigger);
     setStatus("");
+    if (tokenChanged && !state.threadId) await resolvePreTurnConfiguration();
   } catch (error) {
     appliedConfiguration = previousConfiguration;
     tokenDraft = previousConfiguration?.token || "";
@@ -541,12 +593,7 @@ applyConfiguration.addEventListener("click", async () => {
       return;
     }
 
-    const response = await fetch("/configuration/resolve", { method: "POST", headers: { ...authorization(), "Content-Type": "application/json" }, body: JSON.stringify({
-      model: configurationDraft.model || "default",
-      reasoning: configurationDraft.reasoning || "default",
-      permissions: configurationDraft.permissions || "default",
-      fastMode: configurationDraft.fastMode == null ? "default" : configurationDraft.fastMode,
-    }) });
+    const response = await fetch("/configuration/resolve", { method: "POST", headers: { ...authorization(), "Content-Type": "application/json" }, body: JSON.stringify(resolutionRequest(configurationDraft)) });
     if (!response.ok) {
       const failure = await response.json().catch(() => ({}));
       for (const [name, message] of Object.entries(failure.fieldErrors || {})) {
@@ -558,6 +605,12 @@ applyConfiguration.addEventListener("click", async () => {
     const resolved = await response.json();
     appliedConfiguration = { ...configurationDraft, configurationRevision: resolved.configurationRevision };
     if (state.threadId) persistedThreadConfiguration = false;
+    else {
+      state.localNew = true;
+      state.preTurnConfiguration = resolved;
+      saveState();
+      renderPreTurnConfiguration();
+    }
     saveAppliedConfiguration();
     ready = true;
     setConfigurationOpen(false, configure);
@@ -703,9 +756,9 @@ window.addEventListener("resize", updateVisualViewport);
 window.visualViewport?.addEventListener("resize", updateVisualViewport);
 window.visualViewport?.addEventListener("scroll", updateVisualViewport);
 
-newThread.addEventListener("click", () => {
+newThread.addEventListener("click", async () => {
   if (activeTurn || !ready) return;
-  state = { threadId: null, messages: [] };
+  state = { threadId: null, messages: [], localNew: true, preTurnConfiguration: null };
   olderCursor = null;
   persistedThreadConfiguration = false;
   followThread = true;
@@ -715,7 +768,14 @@ newThread.addEventListener("click", () => {
   resizePrompt();
   messages.scrollTop = 0;
   prompt.focus();
-  setStatus("");
+  renderPreTurnConfiguration();
+  setStatus("Resolving configuration…");
+  try {
+    await resolvePreTurnConfiguration();
+    setStatus("");
+  } catch (error) {
+    setStatus(`Configuration could not be resolved: ${error.message}`);
+  }
 });
 
 showStatus.addEventListener("click", async () => {
@@ -747,6 +807,16 @@ composer.addEventListener("submit", async (event) => {
 
   const keepFocus = document.activeElement === prompt;
   const turnConfiguration = { ...appliedConfiguration };
+  let preTurnConfiguration = state.preTurnConfiguration;
+  if (!state.threadId && !preTurnConfiguration?.configurationRevision) {
+    try {
+      setStatus("Resolving configuration…");
+      preTurnConfiguration = await resolvePreTurnConfiguration();
+    } catch (error) {
+      setStatus(`Configuration could not be resolved: ${error.message}`);
+      return;
+    }
+  }
   state.messages.push({ role: "user", text }, { role: "assistant", text: "" });
   state.activeTurn = {
     id: crypto.randomUUID(),
@@ -756,11 +826,11 @@ composer.addEventListener("submit", async (event) => {
     request: {
       prompt: text,
       threadId: state.threadId,
-      model: persistedThreadConfiguration ? undefined : turnConfiguration.model || undefined,
-      reasoning: persistedThreadConfiguration ? undefined : turnConfiguration.reasoning || undefined,
-      permissions: persistedThreadConfiguration ? undefined : turnConfiguration.permissions || undefined,
-      fastMode: persistedThreadConfiguration ? undefined : turnConfiguration.fastMode,
-      configurationRevision: persistedThreadConfiguration ? undefined : turnConfiguration.configurationRevision,
+      model: persistedThreadConfiguration ? undefined : preTurnConfiguration?.configuration.model || turnConfiguration.model || undefined,
+      reasoning: persistedThreadConfiguration ? undefined : preTurnConfiguration?.configuration.reasoning || turnConfiguration.reasoning || undefined,
+      permissions: persistedThreadConfiguration ? undefined : preTurnConfiguration?.configuration.permissions || turnConfiguration.permissions || undefined,
+      fastMode: persistedThreadConfiguration ? undefined : preTurnConfiguration?.configuration.fastMode ?? turnConfiguration.fastMode,
+      configurationRevision: persistedThreadConfiguration ? undefined : preTurnConfiguration?.configurationRevision,
     },
   };
   followThread = true;
@@ -781,7 +851,7 @@ const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, mill
 async function responseError(response) {
   let message = `${response.status} ${response.statusText}`.trim();
   try { message = (await response.json()).error || message; } catch {}
-  const error = new Error(message); error.retryable = response.status >= 500; return error;
+  const error = new Error(message); error.status = response.status; error.retryable = response.status >= 500; return error;
 }
 
 function finishActiveTurn(statusMessage = "") {
@@ -792,7 +862,11 @@ function applyTurnEvent(turnEvent) {
   const turn = state.activeTurn;
   if (!turn || !Number.isSafeInteger(turnEvent.sequence) || turnEvent.sequence <= turn.lastSequence) return false;
   turn.lastSequence = turnEvent.sequence;
-  if (turnEvent.type === "thread.started") state.threadId = turnEvent.thread_id;
+  if (turnEvent.type === "thread.started") {
+    state.threadId = turnEvent.thread_id;
+    state.localNew = false;
+    renderPreTurnConfiguration();
+  }
   if (turnEvent.type === "item.completed" && turnEvent.item?.type === "agent_message") {
     state.messages[turn.messageIndex].text += turnEvent.item.text; setStatus("Codex response updated.");
   }
@@ -816,7 +890,23 @@ async function followActiveTurn() {
         const turn = state.activeTurn;
         if (turn.stage === "starting") {
           const created = await fetch("/turn", { method: "POST", headers: { ...authorization(), "Content-Type": "application/json" }, body: JSON.stringify({ turnId: turn.id, ...turn.request }) });
-          if (!created.ok) throw await responseError(created);
+          if (!created.ok) {
+            const error = await responseError(created);
+            if (error.status === 409 && !turn.request.threadId && /revision is obsolete/i.test(error.message)) {
+              const resolved = await resolvePreTurnConfiguration();
+              turn.request = {
+                ...turn.request,
+                model: resolved.configuration.model,
+                reasoning: resolved.configuration.reasoning,
+                permissions: resolved.configuration.permissions,
+                fastMode: resolved.configuration.fastMode,
+                configurationRevision: resolved.configurationRevision,
+              };
+              saveState();
+              continue;
+            }
+            throw error;
+          }
           turn.stage = "streaming"; saveState();
         }
         const response = await fetch(`/turn/${turn.id}/events?after=${turn.lastSequence}`, { headers: authorization() });

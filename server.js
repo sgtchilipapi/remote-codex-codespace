@@ -86,7 +86,8 @@ function createRelay({ appServer, env = process.env, turnRetentionMs = TURN_RETE
   if (!Number.isSafeInteger(maxBufferedBytes) || maxBufferedBytes < CONTROL_EVENT_RESERVE_BYTES) throw new Error(`maxBufferedBytes must be at least ${CONTROL_EVENT_RESERVE_BYTES}`);
   if (!Number.isSafeInteger(maxSubscribersPerTurn) || maxSubscribersPerTurn < 1) throw new Error("maxSubscribersPerTurn must be positive");
   if (!Number.isSafeInteger(maxRetainedTurns) || maxRetainedTurns < 1) throw new Error("maxRetainedTurns must be positive");
-  const app = express(); const workdir = env.CODESPACE_WORKDIR || "/workspaces/remote-codex-codespace"; const run = createRun(env); const codex = appServer || new AppServerConnection({ run }); const turns = new Map(); let currentConfigurationRevision = null; let currentResolvedConfiguration = null; app.locals.appServer = codex;
+  const app = express(); const workdir = env.CODESPACE_WORKDIR || "/workspaces/remote-codex-codespace"; const run = createRun(env); const codex = appServer || new AppServerConnection({ run }); const turns = new Map(); const configurationRevisions = new Map(); let currentAvailabilityRevision = null; app.locals.appServer = codex;
+  codex.on?.("disconnect", () => { configurationRevisions.clear(); currentAvailabilityRevision = null; });
   app.use(express.json()); app.use(express.static("public"));
   const authorize = (req, res, next) => { if (!env.API_TOKEN || req.get("authorization") !== `Bearer ${env.API_TOKEN}`) return res.status(401).json({ error: "Unauthorized" }); next(); };
   const route = (handler) => async (req, res) => { try { await handler(req, res); } catch (error) { const status = error.status || 502; const message = [400, 404, 409, 429].includes(status) ? error.message : status === 503 ? "Relay capacity unavailable" : status === 504 ? "Codex timed out" : "Codex unavailable"; if (!res.headersSent) res.status(status).json({ error: message }); else res.end(`${JSON.stringify({ type: "error", message })}\n`); } };
@@ -106,9 +107,11 @@ function createRelay({ appServer, env = process.env, turnRetentionMs = TURN_RETE
     if ((typeof draft.fastMode !== "boolean" && draft.fastMode !== "default") || (resolvedFastMode && !selected?.serviceTiers.some(({ id }) => id === "priority"))) fieldErrors.fastMode = "Fast mode is not supported by the selected model.";
     if (Object.keys(fieldErrors).length) return res.status(400).json({ error: "Configuration is unsupported", fieldErrors });
     const resolved = { model: selected.id, reasoning: resolvedReasoning, permissions: resolvedPermissions, fastMode: resolvedFastMode, serviceTier: resolvedFastMode ? "priority" : selected.defaultServiceTier };
-    const configurationRevision = createHash("sha256").update(JSON.stringify({ availability, resolved })).digest("hex");
-    currentConfigurationRevision = configurationRevision;
-    currentResolvedConfiguration = resolved;
+    const availabilityRevision = createHash("sha256").update(JSON.stringify(availability)).digest("hex");
+    const configurationRevision = createHash("sha256").update(JSON.stringify({ availabilityRevision, resolved })).digest("hex");
+    currentAvailabilityRevision = availabilityRevision;
+    configurationRevisions.set(configurationRevision, { availabilityRevision, resolved });
+    while (configurationRevisions.size > 32) configurationRevisions.delete(configurationRevisions.keys().next().value);
     res.json({ configuration: resolved, configurationRevision });
   }));
   app.get("/info", authorize, route(async (_req, res) => { const [models, limits] = await Promise.all([codex.request("model/list", { limit: 100 }), codex.request("account/rateLimits/read", {})]); res.json({ models: models.data.map((item) => ({ id: item.id, name: item.displayName, isDefault: item.isDefault, defaultReasoning: item.defaultReasoningEffort, reasoning: item.supportedReasoningEfforts.map(({ reasoningEffort }) => reasoningEffort) })), rateLimits: limits.rateLimits }); }));
@@ -167,9 +170,10 @@ function createRelay({ appServer, env = process.env, turnRetentionMs = TURN_RETE
     if (typeof prompt !== "string" || !prompt.trim()) throw new RelayError(400, "prompt is required");
     if (threadId && !UUID.test(threadId)) throw new RelayError(400, "threadId is invalid");
     if (requestedId && !UUID.test(requestedId)) throw new RelayError(400, "turnId is invalid");
-    if (configurationRevision && configurationRevision !== currentConfigurationRevision) throw new RelayError(409, "Configuration revision is obsolete");
-    if (fastMode && currentResolvedConfiguration?.serviceTier !== "priority") throw new RelayError(400, "Fast mode is unsupported");
-    const boundConfiguration = configurationRevision ? currentResolvedConfiguration : { model, reasoning, permissions, fastMode };
+    const revision = configurationRevision && configurationRevisions.get(configurationRevision);
+    if (configurationRevision && (!revision || revision.availabilityRevision !== currentAvailabilityRevision)) throw new RelayError(409, "Configuration revision is obsolete");
+    if (fastMode && revision?.resolved.serviceTier !== "priority") throw new RelayError(400, "Fast mode is unsupported");
+    const boundConfiguration = revision ? revision.resolved : { model, reasoning, permissions, fastMode };
     const id = requestedId || randomUUID(); const request = { prompt, threadId, ...boundConfiguration, configurationRevision }; const requestKey = JSON.stringify(request);
     const existing = turns.get(id); if (existing) { if (existing.requestKey !== requestKey) throw new RelayError(409, "turnId already belongs to a different Turn"); return res.status(202).json({ turnId: id, eventsUrl: `/turn/${id}/events` }); }
     if (hasActiveTurn()) throw new RelayError(409, "A Turn is active"); evictCompletedTurns();

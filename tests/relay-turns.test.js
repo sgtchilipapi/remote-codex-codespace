@@ -129,6 +129,46 @@ test("a resolved Configuration carries Fast mode into the first Turn exactly onc
   assert.deepEqual(appServer.calls.find(({ method }) => method === "turn/start").params, { threadId, input: [{ type: "text", text: "Go fast" }], effort: "high", sandboxPolicy: "read-only", approvalPolicy: "untrusted", serviceTier: "priority" });
 });
 
+test("an obsolete Configuration revision is rejected before a Thread starts", async (t) => {
+  const appServer = fakeAppServer();
+  const originalRequest = appServer.request;
+  let configuredReasoning = "high";
+  appServer.request = async (method, params) => {
+    if (method === "model/list") return { data: [{ id: "codex-1", displayName: "Codex 1", isDefault: true, defaultReasoningEffort: configuredReasoning, supportedReasoningEfforts: [{ reasoningEffort: "high" }, { reasoningEffort: "medium" }], serviceTiers: [] }] };
+    if (method === "config/read") return { config: { model: "codex-1", model_reasoning_effort: configuredReasoning, sandbox_mode: "read-only" } };
+    return originalRequest(method, params);
+  };
+  const relay = await serve(appServer); t.after(relay.close);
+  const first = await fetch(`${relay.base}/configuration/resolve`, authorized({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: "default", reasoning: "default", permissions: "default", fastMode: "default" }) }));
+  const firstRevision = (await first.json()).configurationRevision;
+  configuredReasoning = "medium";
+  await fetch(`${relay.base}/configuration/resolve`, authorized({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: "default", reasoning: "default", permissions: "default", fastMode: "default" }) }));
+
+  const stale = await start(relay.base, { turnId: relayTurnId, prompt: "Use the snapshot", configurationRevision: firstRevision });
+
+  assert.equal(stale.status, 409);
+  assert.deepEqual(await stale.json(), { error: "Configuration revision is obsolete" });
+  assert.equal(appServer.calls.some(({ method }) => method === "thread/start" || method === "turn/start"), false);
+});
+
+test("resolving another choice does not obsolete a snapshot from the same availability", async (t) => {
+  const appServer = fakeAppServer();
+  const originalRequest = appServer.request;
+  appServer.request = async (method, params) => {
+    if (method === "model/list") return { data: [{ id: "codex-1", displayName: "Codex 1", isDefault: true, defaultReasoningEffort: "medium", supportedReasoningEfforts: [{ reasoningEffort: "medium" }, { reasoningEffort: "high" }], serviceTiers: [] }] };
+    if (method === "config/read") return { config: { model: "codex-1", model_reasoning_effort: "medium", sandbox_mode: "read-only" } };
+    return originalRequest(method, params);
+  };
+  const relay = await serve(appServer); t.after(relay.close);
+  const resolve = (reasoning) => fetch(`${relay.base}/configuration/resolve`, authorized({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: "codex-1", reasoning, permissions: "read-only", fastMode: false }) }));
+  const firstRevision = (await (await resolve("medium")).json()).configurationRevision;
+  await resolve("high");
+
+  assert.equal((await start(relay.base, { turnId: relayTurnId, prompt: "Keep my snapshot", configurationRevision: firstRevision })).status, 202);
+  await new Promise((resolveStarted) => setImmediate(resolveStarted));
+  assert.equal(appServer.calls.find(({ method }) => method === "turn/start").params.effort, "medium");
+});
+
 test("a Turn survives disconnect and replays every missed event once", async (t) => {
   const appServer = fakeAppServer();
   const relay = await serve(appServer); t.after(relay.close);
