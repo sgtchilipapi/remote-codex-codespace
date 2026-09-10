@@ -1,7 +1,7 @@
 # Resume Codex Threads from the Mobile Client
 
 Label: `ready-for-agent`
-Status: open
+Status: closed
 Assignee: codex
 
 ## Description
@@ -45,3 +45,7 @@ Search; cross-directory Threads; editing, deleting, archiving, renaming, forking
 ## Further Notes
 
 Implement after the responsive Mobile Client ticket so the resume picker can reuse its focus-mode and interaction contract.
+
+## Resolution
+
+Implemented the Thread resume contract on 2026-09-10. The Relay now maintains a reusable Codex app-server connection, exposes authenticated listing/resume/history routes with eligibility checks and safe errors, and continues Turns through the app-server lifecycle. The Mobile Client provides the compact Resume focus view, atomic selection, authoritative reload hydration, older-history loading, and persisted-configuration continuation. Relay contract tests and the complete Chromium behavior/responsive suite pass; the release smoke checklist still covers physical iPhone Safari and Android Chrome verification.

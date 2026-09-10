@@ -61,6 +61,46 @@ async function installStreamingTurn(page) {
   });
 }
 
+const resumableThreadId = "01a086a1-a1b5-7f52-bc60-a9db59b03804";
+
+async function stubResumeList(page) {
+  await page.route("**/threads?*", (route) => route.fulfill({ json: {
+    threads: [{ id: resumableThreadId, title: "Thread resume", preview: "Continue the picker", lastActive: "2026-09-10T12:00:00Z", model: "gpt-5", current: false }],
+    nextCursor: null,
+  } }));
+}
+
+test("Resume is a focus view that cancels without changing the current Thread", async ({ page }) => {
+  await stubResumeList(page);
+  await openConfiguredClient(page);
+  await page.getByRole("button", { name: "Resume" }).click();
+  await expect(page.getByRole("heading", { name: "Resume a Thread" })).toBeFocused();
+  await expect(page.getByLabel("Prompt")).toBeHidden();
+  await expect(page.getByRole("button", { name: /Thread resume/ })).toContainText("Continue the picker");
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Resume" })).toBeFocused();
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem("relay") || '{"threadId":null}').threadId)).toBeNull();
+});
+
+test("selecting an Eligible Thread atomically installs history without starting a Turn", async ({ page }) => {
+  let turnRequests = 0;
+  await stubResumeList(page);
+  await page.route(`**/threads/${resumableThreadId}/resume`, (route) => route.fulfill({ json: {
+    thread: { id: resumableThreadId, model: "gpt-5" },
+    messages: [{ id: "u1", role: "user", text: "Earlier prompt" }, { id: "a1", role: "assistant", text: "Earlier answer" }],
+    olderCursor: null,
+  } }));
+  await page.route("**/turn", (route) => { turnRequests += 1; return route.abort(); });
+  await openConfiguredClient(page);
+  await page.getByRole("button", { name: "Resume" }).click();
+  await page.getByRole("button", { name: /Thread resume/ }).click();
+
+  await expect(page.getByText("Earlier answer", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Prompt")).toBeFocused();
+  expect(turnRequests).toBe(0);
+  expect(await page.evaluate(() => JSON.parse(localStorage.relay).threadId)).toBe(resumableThreadId);
+});
+
 test("startup checking locks Thread actions and normalizes obsolete choices", async ({ page }) => {
   const obsoleteConfiguration = {
     token: "valid-token",

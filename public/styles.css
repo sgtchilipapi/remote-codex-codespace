@@ -98,6 +98,31 @@ button:disabled, input:disabled, select:disabled, textarea:disabled { opacity: .
 }
 
 #configuration[hidden] { display: none; }
+#resume-picker[hidden] { display: none; }
+main.resume-open #messages,
+main.resume-open #status,
+main.resume-open #composer,
+main.resume-open #configuration { display: none; }
+
+#resume-picker {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px;
+  border-radius: 10px;
+  background: var(--surface);
+}
+.resume-heading-row { display: flex; align-items: center; gap: 8px; }
+.resume-heading-row h2 { flex: 1; margin: 0; }
+#resume-status { color: var(--muted); }
+#resume-error { padding: 10px; border: 1px solid var(--danger); border-radius: 8px; color: var(--danger); }
+#resume-error[hidden], #load-more-threads[hidden], #load-older-history[hidden] { display: none; }
+#resume-results { display: grid; gap: 8px; }
+.resume-row { width: 100%; display: grid; gap: 3px; text-align: left; white-space: normal; }
+.resume-title { font-weight: 700; }
+.resume-preview, .resume-meta { color: #374151; font-size: 14px; overflow-wrap: anywhere; }
+#load-more-threads { width: 100%; margin-top: 8px; }
+#load-older-history { width: 100%; margin-bottom: 8px; }
 
 .configuration-grid {
   display: grid;

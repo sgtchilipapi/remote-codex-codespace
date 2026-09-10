@@ -1,5 +1,13 @@
 const shell = document.querySelector("#app-shell");
 const newThread = document.querySelector("#new");
+const resumeThread = document.querySelector("#resume");
+const resumePicker = document.querySelector("#resume-picker");
+const resumeHeading = document.querySelector("#resume-heading");
+const cancelResume = document.querySelector("#cancel-resume");
+const resumeStatus = document.querySelector("#resume-status");
+const resumeError = document.querySelector("#resume-error");
+const resumeResults = document.querySelector("#resume-results");
+const loadMoreThreads = document.querySelector("#load-more-threads");
 const showStatus = document.querySelector("#show-status");
 const configure = document.querySelector("#configure");
 const configuration = document.querySelector("#configuration");
@@ -19,6 +27,7 @@ const reasoningError = document.querySelector("#reasoning-error");
 const permissions = document.querySelector("#permissions");
 const permissionsError = document.querySelector("#permissions-error");
 const messages = document.querySelector("#messages");
+const loadOlderHistory = document.querySelector("#load-older-history");
 const status = document.querySelector("#status");
 const composer = document.querySelector("#composer");
 const prompt = document.querySelector("#prompt");
@@ -33,6 +42,10 @@ let info = null;
 let ready = false;
 let checking = false;
 let activeTurn = false;
+let hydrating = false;
+let resumeCursor = null;
+let olderCursor = null;
+let persistedThreadConfiguration = Boolean(state.threadId);
 let followThread = true;
 let followFrame = 0;
 let programmaticFollowPending = false;
@@ -86,13 +99,67 @@ function setConfigurationOpen(open, focusTarget = null) {
 }
 
 function setThreadControls() {
-  const locked = checking || activeTurn;
+  const locked = checking || activeTurn || hydrating;
   newThread.disabled = locked || !ready;
+  resumeThread.disabled = locked || !ready;
   showStatus.disabled = locked || !ready;
   configure.disabled = locked;
   send.disabled = activeTurn || !ready;
   prompt.disabled = !ready;
 }
+
+function authorization() { return { "Authorization": `Bearer ${appliedConfiguration.token}` }; }
+
+function setResumeOpen(open) {
+  resumePicker.hidden = !open;
+  shell.classList.toggle("resume-open", open);
+  if (open) requestAnimationFrame(() => resumeHeading.focus());
+  else requestAnimationFrame(() => resumeThread.focus());
+}
+
+function displayResumeError(message) {
+  resumeError.textContent = message;
+  resumeError.hidden = false;
+  requestAnimationFrame(() => resumeError.focus());
+}
+
+function renderThreadRows(rows, append = false) {
+  const nodes = rows.map((thread) => {
+    const button = document.createElement("button");
+    button.type = "button"; button.className = "resume-row"; button.dataset.threadId = thread.id;
+    button.disabled = thread.current; button.setAttribute("aria-label", `${thread.title}${thread.current ? ", Current" : ""}; ${thread.preview}; ${thread.model}`);
+    const title = document.createElement("span"); title.className = "resume-title"; title.textContent = `${thread.title}${thread.current ? " · Current" : ""}`;
+    const preview = document.createElement("span"); preview.className = "resume-preview"; preview.textContent = thread.preview;
+    const meta = document.createElement("span"); meta.className = "resume-meta"; meta.textContent = `${new Date(thread.lastActive).toLocaleString()} · ${thread.model}`;
+    button.append(title, preview, meta); button.addEventListener("click", () => selectThread(thread.id, button)); return button;
+  });
+  if (append) resumeResults.append(...nodes); else resumeResults.replaceChildren(...nodes);
+}
+
+async function loadThreads(append = false) {
+  hydrating = true; setThreadControls(); resumeStatus.textContent = append ? "Loading more Threads…" : "Loading Threads…"; resumeError.hidden = true;
+  try {
+    const query = new URLSearchParams(); if (append && resumeCursor) query.set("cursor", resumeCursor); if (state.threadId) query.set("currentThreadId", state.threadId);
+    const response = await fetch(`/threads?${query}`, { headers: authorization() }); if (!response.ok) throw new Error("Threads could not be loaded. Try again.");
+    const result = await response.json(); renderThreadRows(result.threads, append); resumeCursor = result.nextCursor;
+    resumeStatus.textContent = !append && !result.threads.length ? "No Threads to resume" : ""; loadMoreThreads.textContent = "Load more"; loadMoreThreads.dataset.retry = ""; loadMoreThreads.hidden = !resumeCursor;
+  } catch (error) { displayResumeError(error.message); resumeStatus.textContent = ""; loadMoreThreads.textContent = "Retry"; loadMoreThreads.dataset.retry = "true"; loadMoreThreads.hidden = false; }
+  finally { hydrating = false; setThreadControls(); }
+}
+
+async function selectThread(id, row) {
+  hydrating = true; setThreadControls(); for (const button of resumeResults.querySelectorAll("button")) button.disabled = true; resumeStatus.textContent = "Loading Thread…"; resumeError.hidden = true;
+  try {
+    const response = await fetch(`/threads/${id}/resume`, { method: "POST", headers: authorization() }); if (!response.ok) throw new Error(response.status === 404 ? "That Thread is no longer available." : "Thread could not be resumed. Try again.");
+    const result = await response.json(); state = { threadId: result.thread.id, messages: result.messages }; olderCursor = result.olderCursor; persistedThreadConfiguration = true; saveState(); followThread = true; drawMessages({ forceFollow: true });
+    setResumeOpen(false); requestAnimationFrame(() => prompt.focus()); setStatus(result.thread.model ? `Resumed · ${result.thread.model}` : "Resumed");
+  } catch (error) { displayResumeError(error.message); if (/no longer/.test(error.message)) row.remove(); }
+  finally { hydrating = false; setThreadControls(); for (const button of resumeResults.querySelectorAll("button")) button.disabled = button.textContent.includes("Current"); }
+}
+
+resumeThread.addEventListener("click", () => { if (!ready || checking || activeTurn || hydrating) return; setResumeOpen(true); loadThreads(); });
+cancelResume.addEventListener("click", () => { if (!hydrating) setResumeOpen(false); });
+loadMoreThreads.addEventListener("click", () => loadThreads(loadMoreThreads.dataset.retry !== "true"));
 
 function setConfigurationBusy(busy) {
   checking = busy;
@@ -272,6 +339,7 @@ async function checkPersistedConfiguration() {
     }
     ready = true;
     setConfigurationOpen(false);
+    await revalidateCachedThread();
   } catch (error) {
     ready = false;
     configurationDraft = { ...appliedConfiguration };
@@ -282,6 +350,18 @@ async function checkPersistedConfiguration() {
     setConfigurationBusy(false);
     setThreadControls();
   }
+}
+
+async function revalidateCachedThread() {
+  if (!state.threadId || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(state.threadId)) return;
+  hydrating = true; setThreadControls(); setStatus("Restoring Thread…");
+  try {
+    const response = await fetch(`/threads/${state.threadId}/resume`, { method: "POST", headers: authorization() });
+    if (!response.ok) throw new Error();
+    const result = await response.json(); state = { threadId: result.thread.id, messages: result.messages }; olderCursor = result.olderCursor; persistedThreadConfiguration = true; saveState(); drawMessages({ forceFollow: true }); setStatus("");
+  } catch {
+    state = { threadId: null, messages: [] }; olderCursor = null; persistedThreadConfiguration = false; saveState(); drawMessages({ forceFollow: true }); setStatus("The saved Thread is unavailable; started a new Thread.");
+  } finally { hydrating = false; setThreadControls(); }
 }
 
 function openConfiguration() {
@@ -342,6 +422,7 @@ applyConfiguration.addEventListener("click", async () => {
 
     info = checkedInfo;
     appliedConfiguration = { ...configurationDraft };
+    if (state.threadId) persistedThreadConfiguration = false;
     saveAppliedConfiguration();
     ready = true;
     setConfigurationOpen(false, configure);
@@ -416,7 +497,8 @@ function drawMessages({ forceFollow = false } = {}) {
     appendMessageContent(node, role, text);
     return node;
   });
-  messages.replaceChildren(...nodes);
+  messages.replaceChildren(loadOlderHistory, ...nodes);
+  loadOlderHistory.hidden = !olderCursor;
   if (wasFollowing) {
     followThread = true;
     scheduleFollow();
@@ -435,7 +517,21 @@ messages.addEventListener("scroll", () => {
   userScrollIntent = false;
   followThread = isNearBottom();
   readingAnchor = captureReadingAnchor();
+  if (messages.scrollTop <= 1 && olderCursor && !hydrating) loadHistory();
 }, { passive: true });
+
+async function loadHistory() {
+  const cursor = olderCursor; const firstMessage = state.messages[0]; const anchor = messages.children[1]; const offset = anchor?.getBoundingClientRect().top;
+  hydrating = true; setThreadControls(); loadOlderHistory.hidden = true;
+  try {
+    const query = new URLSearchParams({ cursor }); if (firstMessage?.id) query.set("anchorId", firstMessage.id);
+    const response = await fetch(`/threads/${state.threadId}/history?${query}`, { headers: authorization() }); if (!response.ok) throw new Error();
+    const result = await response.json(); const known = new Set(state.messages.map((message) => message.id)); state.messages = [...result.messages.filter((message) => !known.has(message.id)), ...state.messages]; olderCursor = result.olderCursor; saveState(); drawMessages();
+    const replacement = messages.children[result.messages.length + 1]; if (replacement && offset != null) messages.scrollTop += replacement.getBoundingClientRect().top - offset;
+  } catch { loadOlderHistory.hidden = false; loadOlderHistory.textContent = "Retry loading older history"; }
+  finally { hydrating = false; setThreadControls(); }
+}
+loadOlderHistory.addEventListener("click", loadHistory);
 
 function visualViewportHeight() { return window.visualViewport?.height || window.innerHeight; }
 
@@ -475,6 +571,8 @@ window.visualViewport?.addEventListener("scroll", updateVisualViewport);
 newThread.addEventListener("click", () => {
   if (activeTurn || !ready) return;
   state = { threadId: null, messages: [] };
+  olderCursor = null;
+  persistedThreadConfiguration = false;
   followThread = true;
   saveState();
   drawMessages({ forceFollow: true });
@@ -529,9 +627,9 @@ composer.addEventListener("submit", async (event) => {
       body: JSON.stringify({
         prompt: text,
         threadId: state.threadId,
-        model: turnConfiguration.model || undefined,
-        reasoning: turnConfiguration.reasoning || undefined,
-        permissions: turnConfiguration.permissions || undefined,
+        model: persistedThreadConfiguration ? undefined : turnConfiguration.model || undefined,
+        reasoning: persistedThreadConfiguration ? undefined : turnConfiguration.reasoning || undefined,
+        permissions: persistedThreadConfiguration ? undefined : turnConfiguration.permissions || undefined,
       }),
     });
     if (!response.ok) throw new Error((await response.json()).error);
