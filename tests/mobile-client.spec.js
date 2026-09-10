@@ -106,11 +106,37 @@ test("Resume is a focus view that cancels without changing the current Thread", 
   expect(await page.evaluate(() => JSON.parse(localStorage.getItem("relay") || '{"threadId":null}').threadId)).toBeNull();
 });
 
+test("Resume pagination appends accessible Thread choices", async ({ page }) => {
+  const cursors = [];
+  await page.route("**/threads?*", async (route) => {
+    const cursor = new URL(route.request().url()).searchParams.get("cursor");
+    cursors.push(cursor);
+    await route.fulfill({ json: cursor
+      ? { threads: [{ id: "01a086a1-a5fd-7fd1-80d7-a7b607508df4", title: "Older Thread", preview: "Earlier work", lastActive: "2026-09-09T12:00:00Z", model: "gpt-5", current: false }], nextCursor: null }
+      : { threads: [{ id: resumableThreadId, title: "Recent Thread", preview: "Latest work", lastActive: "2026-09-10T12:00:00Z", model: "gpt-5.2", current: false }], nextCursor: "older-page" } });
+  });
+  await openConfiguredClient(page);
+
+  await page.getByRole("button", { name: "Resume" }).click();
+  await expect(page.getByRole("button", { name: /Recent Thread; Latest work; gpt-5.2/ })).toBeVisible();
+  await page.getByRole("button", { name: "Load more" }).click();
+
+  await expect(page.getByRole("button", { name: /Recent Thread/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Older Thread; Earlier work; gpt-5/ })).toBeVisible();
+  expect(cursors).toEqual([null, "older-page"]);
+});
+
 test("selecting an Eligible Thread atomically installs history without starting a Turn", async ({ page }) => {
   let turnRequests = 0;
   await stubResumeList(page);
   await page.route(`**/threads/${resumableThreadId}/resume`, (route) => route.fulfill({ json: {
-    thread: { id: resumableThreadId, model: "gpt-5" },
+    thread: { id: resumableThreadId },
+    effectiveConfiguration: {
+      model: "gpt-5",
+      reasoning: "high",
+      permissions: { sandboxPolicy: { type: "workspaceWrite" }, approvalPolicy: "on-request", profile: null },
+      fastMode: { enabled: true, serviceTier: "priority" },
+    },
     messages: [{ id: "u1", role: "user", text: "Earlier prompt" }, { id: "a1", role: "assistant", text: "Earlier answer" }],
     olderCursor: null,
   } }));
@@ -122,7 +148,51 @@ test("selecting an Eligible Thread atomically installs history without starting 
   await expect(page.getByText("Earlier answer", { exact: true })).toBeVisible();
   await expect(page.getByLabel("Prompt")).toBeFocused();
   expect(turnRequests).toBe(0);
-  expect(await page.evaluate(() => JSON.parse(localStorage.relay).threadId)).toBe(resumableThreadId);
+  expect(await page.evaluate(() => JSON.parse(localStorage.relay))).toEqual({
+    threadId: resumableThreadId,
+    messages: [{ id: "u1", role: "user", text: "Earlier prompt" }, { id: "a1", role: "assistant", text: "Earlier answer" }],
+    effectiveConfiguration: {
+      model: "gpt-5",
+      reasoning: "high",
+      permissions: { sandboxPolicy: { type: "workspaceWrite" }, approvalPolicy: "on-request", profile: null },
+      fastMode: { enabled: true, serviceTier: "priority" },
+    },
+  });
+});
+
+test("a failed Resume preserves the prior Thread, history, and effective state", async ({ page }) => {
+  await page.addInitScript(({ configuration, threadId }) => {
+    localStorage.setItem("relayConfiguration", JSON.stringify(configuration));
+    localStorage.setItem("relay", JSON.stringify({
+      threadId,
+      messages: [{ id: "old", role: "assistant", text: "Keep this view" }],
+      effectiveConfiguration: { model: "old-model", reasoning: null, permissions: null, fastMode: null },
+    }));
+  }, { configuration: appliedConfiguration, threadId: "01a086a1-a5fd-7fd1-80d7-a7b607508df4" });
+  await page.route("**/configuration", (route) => route.fulfill({ json: modelInfo }));
+  await page.route("**/threads/01a086a1-a5fd-7fd1-80d7-a7b607508df4/resume", (route) => route.fulfill({ json: {
+    thread: { id: "01a086a1-a5fd-7fd1-80d7-a7b607508df4" },
+    messages: [{ id: "old", role: "assistant", text: "Keep this view" }],
+    effectiveConfiguration: { model: "old-model", reasoning: null, permissions: null, fastMode: null },
+    olderCursor: null,
+  } }));
+  await stubResumeList(page);
+  await page.route(`**/threads/${resumableThreadId}/resume`, (route) => route.fulfill({ status: 502, json: { error: "Codex unavailable" } }));
+  await page.goto("/");
+  await expect(page.getByText("Keep this view", { exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "Resume" }).click();
+  await page.getByRole("button", { name: /Thread resume/ }).click();
+
+  await expect(page.getByRole("alert")).toContainText("Thread could not be resumed");
+  await expect(page.getByText("Keep this view", { exact: true })).toBeHidden();
+  expect(await page.evaluate(() => JSON.parse(localStorage.relay))).toEqual({
+    threadId: "01a086a1-a5fd-7fd1-80d7-a7b607508df4",
+    messages: [{ id: "old", role: "assistant", text: "Keep this view" }],
+    effectiveConfiguration: { model: "old-model", reasoning: null, permissions: null, fastMode: null },
+  });
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(page.getByText("Keep this view", { exact: true })).toBeVisible();
 });
 
 test("New resolves and announces a concrete local configuration without creating a Thread", async ({ page }) => {

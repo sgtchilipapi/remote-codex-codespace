@@ -5,7 +5,8 @@ const { createHash, randomUUID } = require("node:crypto");
 const { StringDecoder } = require("node:string_decoder");
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const INTERACTIVE_SOURCES = new Set(["cli", "vscode", "appServer"]);
+const ELIGIBLE_SOURCES = new Set(["vscode", "appServer"]);
+const ELIGIBLE_SOURCE_KINDS = [...ELIGIBLE_SOURCES];
 const TURN_RETENTION_MS = 15 * 60 * 1000;
 const MAX_BUFFERED_BYTES = 5 * 1024 * 1024;
 const CONTROL_EVENT_RESERVE_BYTES = 2048;
@@ -39,10 +40,26 @@ class AppServerConnection extends EventEmitter {
 function createRun(env) { return (command) => spawn("gh", ["codespace", "ssh", "-c", env.CODESPACE, "--", command], { env: { ...env, GH_PROMPT_DISABLED: "1" }, stdio: ["pipe", "pipe", "pipe"] }); }
 function sourceKind(thread) { return typeof thread.source === "string" ? thread.source : thread.sourceKind || Object.keys(thread.source || {})[0]; }
 function recognizable(thread) { return String(thread.name || thread.preview || "").trim().length > 0; }
-function eligible(thread, workdir) { return thread && thread.cwd === workdir && !thread.archived && INTERACTIVE_SOURCES.has(sourceKind(thread)) && recognizable(thread); }
+function eligible(thread, workdir) { return thread && thread.cwd === workdir && !thread.archived && ELIGIBLE_SOURCES.has(sourceKind(thread)) && recognizable(thread); }
 function publicThread(thread, currentThreadId) { const preview = String(thread.preview || "").trim(); return { id: thread.id, title: String(thread.name || preview).trim(), preview, lastActive: thread.recencyAt ?? thread.updatedAt ?? thread.createdAt, model: thread.model || "", current: thread.id === currentThreadId }; }
 function itemText(item) { if (typeof item.text === "string") return item.text; if (typeof item.message === "string") return item.message; if (Array.isArray(item.content)) return item.content.filter((part) => ["text", "input_text", "output_text"].includes(part.type)).map((part) => part.text || "").join(""); return ""; }
 function normalizeItems(turns, anchorId) { const output = []; for (const turn of [...turns].reverse()) for (const item of turn.items || []) { if (!item.id || item.id === anchorId) continue; const type = String(item.type || "").toLowerCase(); let role; if (["usermessage", "user_message"].includes(type)) role = "user"; else if (["agentmessage", "agent_message", "error"].includes(type)) role = "assistant"; else continue; const text = itemText(item); if (text) output.push({ id: item.id, role, text: type === "error" ? `Error: ${text}` : text }); } return output; }
+function effectiveConfiguration(resumed) {
+  const serviceTier = resumed.serviceTier ?? null;
+  return {
+    model: resumed.model ?? null,
+    reasoning: resumed.reasoningEffort ?? null,
+    permissions: {
+      sandboxPolicy: resumed.sandboxPolicy ?? resumed.sandbox ?? null,
+      approvalPolicy: resumed.approvalPolicy ?? null,
+      profile: null,
+    },
+    fastMode: serviceTier == null ? null : {
+      enabled: serviceTier === "priority" ? true : null,
+      serviceTier,
+    },
+  };
+}
 function validateCursor(value, required = false) { if ((required && !value) || (value != null && (typeof value !== "string" || !value || Buffer.byteLength(value) > 4096 || /[\u0000-\u001f\u007f]/.test(value)))) throw new RelayError(400, "Invalid cursor"); }
 function applyTurnPermissions(params, permissions) {
   if (!permissions) return;
@@ -115,10 +132,10 @@ function createRelay({ appServer, env = process.env, turnRetentionMs = TURN_RETE
     res.json({ configuration: resolved, configurationRevision });
   }));
   app.get("/info", authorize, route(async (_req, res) => { const [models, limits] = await Promise.all([codex.request("model/list", { limit: 100 }), codex.request("account/rateLimits/read", {})]); res.json({ models: models.data.map((item) => ({ id: item.id, name: item.displayName, isDefault: item.isDefault, defaultReasoning: item.defaultReasoningEffort, reasoning: item.supportedReasoningEfforts.map(({ reasoningEffort }) => reasoningEffort) })), rateLimits: limits.rateLimits }); }));
-  app.get("/threads", authorize, route(async (req, res) => { validateCursor(req.query.cursor); if (req.query.currentThreadId && !UUID.test(req.query.currentThreadId)) throw new RelayError(400, "Invalid Thread ID"); const params = { archived: false, cwd: workdir, limit: 20, sortDirection: "desc", sortKey: "recency_at" }; if (req.query.cursor) params.cursor = req.query.cursor; const result = await codex.request("thread/list", params); res.json({ threads: result.data.filter((thread) => eligible(thread, workdir)).map((thread) => publicThread(thread, req.query.currentThreadId)), nextCursor: result.nextCursor || null }); }));
+  app.get("/threads", authorize, route(async (req, res) => { validateCursor(req.query.cursor); if (req.query.currentThreadId && !UUID.test(req.query.currentThreadId)) throw new RelayError(400, "Invalid Thread ID"); const params = { archived: false, cwd: workdir, limit: 20, sortDirection: "desc", sortKey: "recency_at", sourceKinds: ELIGIBLE_SOURCE_KINDS }; if (req.query.cursor) params.cursor = req.query.cursor; const result = await codex.request("thread/list", params); res.json({ threads: result.data.filter((thread) => eligible(thread, workdir)).map((thread) => publicThread(thread, req.query.currentThreadId)), nextCursor: result.nextCursor || null }); }));
   async function readEligible(threadId) { const result = await codex.request("thread/read", { threadId, includeTurns: false }); if (!eligible(result.thread, workdir)) throw new RelayError(404, "Thread not found"); return result.thread; }
   const hasActiveTurn = () => [...turns.values()].some((turn) => turn.status === "running");
-  app.post("/threads/:id/resume", authorize, route(async (req, res) => { if (!UUID.test(req.params.id)) throw new RelayError(400, "Invalid Thread ID"); if (hasActiveTurn()) throw new RelayError(409, "A Turn is active"); await readEligible(req.params.id); const resumed = await codex.request("thread/resume", { threadId: req.params.id, excludeTurns: true }); if (!eligible(resumed.thread, workdir)) throw new RelayError(404, "Thread not found"); const history = await codex.request("thread/turns/list", { threadId: req.params.id, cursor: null, limit: 20, sortDirection: "desc", itemsView: "full" }); res.json({ thread: { id: resumed.thread.id, model: resumed.thread.model || "" }, messages: normalizeItems(history.data || [], null), olderCursor: history.nextCursor || null }); }));
+  app.post("/threads/:id/resume", authorize, route(async (req, res) => { if (!UUID.test(req.params.id)) throw new RelayError(400, "Invalid Thread ID"); if (hasActiveTurn()) throw new RelayError(409, "A Turn is active"); await readEligible(req.params.id); const resumed = await codex.request("thread/resume", { threadId: req.params.id, excludeTurns: true }); if (!eligible(resumed.thread, workdir)) throw new RelayError(404, "Thread not found"); const history = await codex.request("thread/turns/list", { threadId: req.params.id, cursor: null, limit: 20, sortDirection: "desc", itemsView: "full" }); res.json({ thread: { id: resumed.thread.id }, effectiveConfiguration: effectiveConfiguration(resumed), messages: normalizeItems(history.data || [], null), olderCursor: history.nextCursor || null }); }));
   app.get("/threads/:id/history", authorize, route(async (req, res) => { if (!UUID.test(req.params.id)) throw new RelayError(400, "Invalid Thread ID"); validateCursor(req.query.cursor, true); await readEligible(req.params.id); const history = await codex.request("thread/turns/list", { threadId: req.params.id, cursor: req.query.cursor, limit: 20, sortDirection: "desc", itemsView: "full" }); res.json({ messages: normalizeItems(history.data || [], req.query.anchorId), olderCursor: history.nextCursor || null }); }));
   app.get("/test", authorize, (_req, res) => { const child = run("hostname && pwd"); let stdout = ""; child.stdout.on("data", (chunk) => { stdout += chunk; }); child.on("error", () => { if (!res.headersSent) res.status(502).json({ error: "Codespace unavailable" }); }); child.on("close", (code) => { if (res.headersSent) return; if (code !== 0) return res.status(502).json({ error: "Codespace unavailable" }); res.type("text/plain").send(stdout); }); child.stdin.end(); });
   function appendTurnEvent(turn, event, control = false) {

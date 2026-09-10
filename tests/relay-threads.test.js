@@ -19,12 +19,13 @@ async function request(app, path, options = {}) {
   }
 }
 
-test("lists only recognizable threads using fixed eligibility filters", async () => {
+test("lists only recognizable Threads from allowed source kinds", async () => {
   const calls = [];
   const appServer = { request: async (method, params) => {
     calls.push({ method, params });
     return { data: [
       { id: uuid, name: "  Release prep ", preview: "ship it", updatedAt: 20, model: "gpt-5", cwd: "/repo", archived: false, source: "appServer" },
+      { id: otherUuid, name: "CLI Thread", preview: "do not probe", updatedAt: 19, model: "gpt-5", cwd: "/repo", archived: false, source: "cli" },
       { id: otherUuid, name: " ", preview: "  " },
     ], nextCursor: "next" };
   } };
@@ -33,20 +34,27 @@ test("lists only recognizable threads using fixed eligibility filters", async ()
   assert.equal(response.status, 200);
   assert.deepEqual(calls, [{ method: "thread/list", params: {
     archived: false, cursor: "opaque", cwd: "/repo", limit: 20,
-    sortDirection: "desc", sortKey: "recency_at",
+    sortDirection: "desc", sortKey: "recency_at", sourceKinds: ["vscode", "appServer"],
   } }]);
   assert.deepEqual(await response.json(), { threads: [{
     id: uuid, title: "Release prep", preview: "ship it", lastActive: 20, model: "gpt-5", current: true,
   }], nextCursor: "next" });
 });
 
-test("resume revalidates eligibility, uses no overrides, and returns safe chronological history", async () => {
+test("resume revalidates eligibility and returns canonical history with reported effective state", async () => {
   const calls = [];
   const thread = { id: uuid, cwd: "/repo", archived: false, source: "appServer", preview: "hello", model: "gpt-5" };
   const appServer = { request: async (method, params) => {
     calls.push({ method, params });
     if (method === "thread/read") return { thread };
-    if (method === "thread/resume") return { thread };
+    if (method === "thread/resume") return {
+      thread,
+      model: "gpt-5.2",
+      reasoningEffort: "high",
+      serviceTier: "priority",
+      sandbox: { type: "workspaceWrite" },
+      approvalPolicy: "on-request",
+    };
     return { data: [{ id: "turn-2", items: [{ id: "a2", type: "agentMessage", text: "answer" }] }, { id: "turn-1", items: [{ id: "u1", type: "userMessage", content: [{ type: "text", text: "question" }] }, { id: "tool", type: "commandExecution", command: "secret" }] }], nextCursor: "older" };
   } };
   const response = await request(createRelay({ appServer, env: { API_TOKEN: "secret", CODESPACE_WORKDIR: "/repo" } }), `/threads/${uuid}/resume`, { method: "POST" });
@@ -57,9 +65,37 @@ test("resume revalidates eligibility, uses no overrides, and returns safe chrono
     { method: "thread/resume", params: { threadId: uuid, excludeTurns: true } },
     { method: "thread/turns/list", params: { threadId: uuid, cursor: null, limit: 20, sortDirection: "desc", itemsView: "full" } },
   ]);
-  assert.deepEqual(await response.json(), { thread: { id: uuid, model: "gpt-5" }, messages: [
+  assert.deepEqual(await response.json(), { thread: { id: uuid }, effectiveConfiguration: {
+    model: "gpt-5.2",
+    reasoning: "high",
+    permissions: {
+      sandboxPolicy: { type: "workspaceWrite" },
+      approvalPolicy: "on-request",
+      profile: null,
+    },
+    fastMode: { enabled: true, serviceTier: "priority" },
+  }, messages: [
     { id: "u1", role: "user", text: "question" }, { id: "a2", role: "assistant", text: "answer" },
   ], olderCursor: "older" });
+});
+
+test("resume leaves unreported effective fields unavailable instead of inferring persisted metadata", async () => {
+  const thread = { id: uuid, cwd: "/repo", archived: false, source: "vscode", preview: "hello", model: "persisted-model" };
+  const appServer = { request: async (method) => {
+    if (method === "thread/read") return { thread };
+    if (method === "thread/resume") return { thread };
+    return { data: [], nextCursor: null };
+  } };
+
+  const response = await request(createRelay({ appServer, env: { API_TOKEN: "secret", CODESPACE_WORKDIR: "/repo" } }), `/threads/${uuid}/resume`, { method: "POST" });
+
+  assert.equal(response.status, 200);
+  assert.deepEqual((await response.json()).effectiveConfiguration, {
+    model: null,
+    reasoning: null,
+    permissions: { sandboxPolicy: null, approvalPolicy: null, profile: null },
+    fastMode: null,
+  });
 });
 
 test("ineligible, malformed, and oversized inputs fail without disclosure", async () => {
@@ -72,8 +108,21 @@ test("ineligible, malformed, and oversized inputs fail without disclosure", asyn
   assert.equal((await request(app, `/threads?cursor=${"x".repeat(4097)}`)).status, 400);
 });
 
+test("metadata revalidation rejects known CLI and exec Threads without probing resume", async () => {
+  for (const source of ["cli", "exec"]) {
+    const calls = [];
+    const appServer = { request: async (method) => {
+      calls.push(method);
+      return { thread: { id: uuid, cwd: "/repo", archived: false, source, preview: "known" } };
+    } };
+    const response = await request(createRelay({ appServer, env: { API_TOKEN: "secret", CODESPACE_WORKDIR: "/repo" } }), `/threads/${uuid}/resume`, { method: "POST" });
+    assert.equal(response.status, 404);
+    assert.deepEqual(calls, ["thread/read"]);
+  }
+});
+
 test("history de-duplicates inclusive anchors and keeps errors safe", async () => {
-  const thread = { id: uuid, cwd: "/repo", archived: false, source: "cli", name: "Known" };
+  const thread = { id: uuid, cwd: "/repo", archived: false, source: "appServer", name: "Known" };
   const appServer = { request: async (method) => method === "thread/read" ? { thread } : {
     data: [{ id: "turn-1", items: [{ id: "anchor", type: "userMessage", content: [{ type: "text", text: "repeat" }] }, { id: "err", type: "error", message: "safe failure", details: "/secret/path" }] }],
     nextCursor: null,

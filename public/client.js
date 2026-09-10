@@ -210,6 +210,17 @@ function displayResumeError(message) {
   requestAnimationFrame(() => resumeError.focus());
 }
 
+function canonicalResumeState(result) {
+  if (!result?.thread || typeof result.thread.id !== "string" || !Array.isArray(result.messages) || !result.effectiveConfiguration) {
+    throw new Error("Thread could not be resumed. Try again.");
+  }
+  return {
+    threadId: result.thread.id,
+    messages: result.messages,
+    effectiveConfiguration: result.effectiveConfiguration,
+  };
+}
+
 function renderThreadRows(rows, append = false) {
   const nodes = rows.map((thread) => {
     const button = document.createElement("button");
@@ -239,8 +250,8 @@ async function selectThread(id, row) {
   hydrating = true; setThreadControls(); for (const button of resumeResults.querySelectorAll("button")) button.disabled = true; resumeStatus.textContent = "Loading Thread…"; resumeError.hidden = true;
   try {
     const response = await fetch(`/threads/${id}/resume`, { method: "POST", headers: authorization() }); if (!response.ok) throw new Error(response.status === 404 ? "That Thread is no longer available." : "Thread could not be resumed. Try again.");
-    const result = await response.json(); state = { threadId: result.thread.id, messages: result.messages }; olderCursor = result.olderCursor; persistedThreadConfiguration = true; saveState(); followThread = true; renderPreTurnConfiguration(); drawMessages({ forceFollow: true });
-    setResumeOpen(false); requestAnimationFrame(() => prompt.focus()); setStatus(result.thread.model ? `Resumed · ${result.thread.model}` : "Resumed");
+    const result = await response.json(); const resumedState = canonicalResumeState(result); state = resumedState; olderCursor = result.olderCursor; persistedThreadConfiguration = true; saveState(); followThread = true; renderPreTurnConfiguration(); drawMessages({ forceFollow: true });
+    setResumeOpen(false); requestAnimationFrame(() => prompt.focus()); setStatus(resumedState.effectiveConfiguration.model ? `Resumed · ${resumedState.effectiveConfiguration.model}` : "Resumed");
   } catch (error) { displayResumeError(error.message); if (/no longer/.test(error.message)) row.remove(); }
   finally { hydrating = false; setThreadControls(); for (const button of resumeResults.querySelectorAll("button")) button.disabled = button.textContent.includes("Current"); }
 }
@@ -484,7 +495,7 @@ async function revalidateCachedThread() {
   try {
     const response = await fetch(`/threads/${state.threadId}/resume`, { method: "POST", headers: authorization() });
     if (!response.ok) throw new Error();
-    const result = await response.json(); state = { threadId: result.thread.id, messages: result.messages }; olderCursor = result.olderCursor; persistedThreadConfiguration = true; saveState(); renderPreTurnConfiguration(); drawMessages({ forceFollow: true }); setStatus("");
+    const result = await response.json(); state = canonicalResumeState(result); olderCursor = result.olderCursor; persistedThreadConfiguration = true; saveState(); renderPreTurnConfiguration(); drawMessages({ forceFollow: true }); setStatus("");
   } catch {
     state = { threadId: null, messages: [] }; olderCursor = null; persistedThreadConfiguration = false; saveState(); drawMessages({ forceFollow: true }); setStatus("The saved Thread is unavailable; started a new Thread.");
   } finally { hydrating = false; setThreadControls(); }

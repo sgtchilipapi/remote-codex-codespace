@@ -32,6 +32,7 @@ An implementation-ready specification that resolves every finding in [`responsiv
 - [Separate Settings and establish the authenticated entry gate](tickets/08-separate-settings-and-authenticated-entry.md): Isolate token authentication in non-cancellable first-use and transactional later Settings, gating Thread entry on live availability while preserving Thread state across token edits.
 - [Add capability-driven Configuration with Fast mode](tickets/09-add-capability-driven-configuration.md): Project live Codex capabilities into a transactional Configuration draft, validate one atomic revision, and carry advertised Fast mode into the first Turn.
 - [Make New a revision-safe local Thread entry](tickets/10-make-new-revision-safe-local-entry.md): Persist and announce one concrete local Pre-Turn snapshot, bind it to the first Turn, and safely re-resolve obsolete revisions before Codex starts.
+- [Resume Eligible Threads with canonical effective state](tickets/11-resume-eligible-threads-with-effective-state.md): Filter listing and revalidation to allowed sources, and atomically install canonical ID-bearing history with only Codex-reported effective settings.
 
 ## Not yet specified
 
@@ -47,8 +48,7 @@ None.
 
 ## Open child tickets
 
-1. [Resume Eligible Threads with canonical effective state](tickets/11-resume-eligible-threads-with-effective-state.md)
-2. [Render item-owned assistant and Activity bubbles](tickets/12-render-item-owned-assistant-and-activity-bubbles.md)
-3. [Rehydrate persisted Thread and local-New views safely](tickets/13-rehydrate-persisted-thread-views.md)
-4. [Expose and present effective Status end to end](tickets/14-expose-and-present-effective-status.md)
-5. [Retire the compatibility facade and enforce the release matrix](tickets/15-retire-info-and-enforce-release-matrix.md)
+1. [Render item-owned assistant and Activity bubbles](tickets/12-render-item-owned-assistant-and-activity-bubbles.md)
+2. [Rehydrate persisted Thread and local-New views safely](tickets/13-rehydrate-persisted-thread-views.md)
+3. [Expose and present effective Status end to end](tickets/14-expose-and-present-effective-status.md)
+4. [Retire the compatibility facade and enforce the release matrix](tickets/15-retire-info-and-enforce-release-matrix.md)
