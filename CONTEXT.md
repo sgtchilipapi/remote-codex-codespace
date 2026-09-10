@@ -29,13 +29,29 @@ A persisted, non-archived interactive Thread with recognizable user content whos
 _Avoid_: Resumable session, cross-workspace Thread
 
 **Configuration panel**:
-The collapsible area of the Mobile Client where the user stages the API token, model, reasoning effort, and permissions for subsequent Turns.
+The collapsible area of the Mobile Client where the user stages model, reasoning effort, permissions, and Fast mode for subsequent Turns.
 _Avoid_: Settings page, navigation drawer
 
+**Settings panel**:
+The collapsible area of the Mobile Client where the user stages and validates the Relay API token.
+_Avoid_: Configuration panel, settings page, navigation drawer
+
 **Applied configuration**:
-The Mobile Client configuration most recently authenticated and committed for subsequent Turns.
+The Mobile Client's most recently committed model, reasoning effort, permissions, and Fast mode choices for subsequent Turns.
 _Avoid_: Saved settings, active settings
 
 **Configuration draft**:
 The editable copy of the applied configuration held while the Configuration panel is open.
 _Avoid_: Temporary settings, pending settings
+
+**Pre-Turn configuration**:
+The concrete model, reasoning effort, permissions, and Fast mode values a new local Thread view will use for its first Turn, resolved from Codex defaults and the Applied configuration before a real Codex Thread exists.
+_Avoid_: Effective Thread settings, requested configuration, default configuration
+
+**Assistant bubble**:
+One visible Mobile Client transcript entry owned by one Codex assistant item; completed items never share or append to the same bubble.
+_Avoid_: Response stream, combined answer
+
+**Activity bubble**:
+The temporary, non-transcript Mobile Client indicator of the current Turn activity, derived from structured Codex lifecycle events and removed when the activity ends.
+_Avoid_: Thinking trace, reasoning bubble, status message

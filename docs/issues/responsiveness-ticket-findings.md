@@ -6,3 +6,4 @@ Status check should show Model, Reasoning, Fast Mode, Context window, 5h limit r
 
 Configuration panel should also expose a fast mode toggle button.
 
+Resume Threads that can be selected include Codex CLI Threads that when tried cannot restore/resume. Is there a way to filter these out?
