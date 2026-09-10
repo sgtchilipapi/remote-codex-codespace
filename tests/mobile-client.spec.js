@@ -234,6 +234,91 @@ test("an untouched local New view and its concrete announcement survive reload",
   expect(await page.evaluate(() => JSON.parse(localStorage.relay).preTurnConfiguration.configurationRevision)).toBe("persisted-revision");
 });
 
+test("a persisted Thread stays locked until reload installs canonical history and effective state", async ({ page }) => {
+  let releaseResume;
+  await page.addInitScript(({ configuration, threadId }) => {
+    localStorage.setItem("relayConfiguration", JSON.stringify(configuration));
+    localStorage.setItem("relay", JSON.stringify({
+      threadId,
+      messages: [
+        { id: "cached", role: "assistant", text: "Cached answer" },
+        { id: "partial", role: "assistant", text: "Interrupted draft", interrupted: true },
+        { id: "recovery", role: "assistant", text: "Turn recovery unavailable", error: true },
+      ],
+      effectiveConfiguration: { model: "cached-model", reasoning: "low", permissions: null, fastMode: null },
+    }));
+  }, { configuration: appliedConfiguration, threadId: resumableThreadId });
+  await page.route("**/configuration", (route) => route.fulfill({ json: modelInfo }));
+  await page.route(`**/threads/${resumableThreadId}/resume`, async (route) => {
+    await new Promise((resolve) => { releaseResume = resolve; });
+    await route.fulfill({ json: {
+      thread: { id: resumableThreadId },
+      messages: [{ id: "canonical", role: "assistant", text: "Canonical answer" }],
+      effectiveConfiguration: { model: "codex-1", reasoning: "high", permissions: null, fastMode: { enabled: true, serviceTier: "priority" } },
+      olderCursor: "older-cursor",
+    } });
+  });
+
+  await page.goto("/");
+  await expect.poll(() => typeof releaseResume).toBe("function");
+  await expect(page.getByLabel("Prompt")).toBeDisabled();
+  await expect(page.getByRole("button", { name: "New" })).toBeDisabled();
+  await expect(page.getByRole("status").filter({ hasText: "Restoring Thread" })).toBeVisible();
+
+  releaseResume();
+  await expect(page.getByLabel("Prompt")).toBeEnabled();
+  await expect(page.getByText("Canonical answer", { exact: true })).toBeVisible();
+  await expect(page.getByText("Cached answer", { exact: true })).toBeHidden();
+  await expect(page.getByText("Interrupted draft", { exact: true })).toBeHidden();
+  await expect(page.getByText("Turn recovery unavailable", { exact: true })).toBeHidden();
+  expect(await page.evaluate(() => JSON.parse(localStorage.relay))).toEqual({
+    threadId: resumableThreadId,
+    messages: [{ id: "canonical", role: "assistant", text: "Canonical answer" }],
+    effectiveConfiguration: { model: "codex-1", reasoning: "high", permissions: null, fastMode: { enabled: true, serviceTier: "priority" } },
+  });
+});
+
+test("an unavailable persisted Thread recovers to a composer-enabled local New view", async ({ page }) => {
+  const mutations = [];
+  await page.addInitScript(({ configuration, threadId }) => {
+    localStorage.setItem("relayConfiguration", JSON.stringify(configuration));
+    localStorage.setItem("relay", JSON.stringify({ threadId, messages: [{ id: "cached", role: "assistant", text: "Cached answer" }] }));
+  }, { configuration: appliedConfiguration, threadId: resumableThreadId });
+  await page.route("**/configuration", (route) => route.fulfill({ json: modelInfo }));
+  await page.route(`**/threads/${resumableThreadId}/resume`, (route) => {
+    mutations.push("resume");
+    return route.fulfill({ status: 404, json: { error: "Thread not found" } });
+  });
+  await page.route("**/configuration/resolve", (route) => {
+    mutations.push("resolve");
+    return route.fulfill({ json: {
+      configuration: { model: "codex-1", reasoning: "medium", permissions: "workspace-write", fastMode: false, serviceTier: null },
+      configurationRevision: "recovery-revision",
+    } });
+  });
+  await page.route("**/turn", (route) => {
+    mutations.push("turn");
+    return route.abort();
+  });
+
+  await page.goto("/");
+
+  await expect(page.getByLabel("Prompt")).toBeEnabled();
+  await expect(page.getByText("Cached answer", { exact: true })).toBeHidden();
+  await expect(page.getByRole("status").filter({ hasText: "saved Thread is unavailable" })).toContainText("returned to a new view");
+  await expect(page.getByRole("status", { name: "Pre-Turn configuration" })).toContainText("Model: Codex 1");
+  expect(mutations).toEqual(["resume", "resolve"]);
+  expect(await page.evaluate(() => JSON.parse(localStorage.relay))).toEqual({
+    threadId: null,
+    messages: [],
+    localNew: true,
+    preTurnConfiguration: {
+      configuration: { model: "codex-1", reasoning: "medium", permissions: "workspace-write", fastMode: false, serviceTier: null },
+      configurationRevision: "recovery-revision",
+    },
+  });
+});
+
 test("the first local Turn retries an obsolete revision with a newly resolved snapshot", async ({ page }) => {
   await installStreamingTurn(page);
   await openConfiguredClient(page);

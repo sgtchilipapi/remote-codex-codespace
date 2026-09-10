@@ -196,8 +196,8 @@ function setThreadControls() {
   showStatus.disabled = checking || hydrating || !ready;
   configure.disabled = locked || !ready || !settings.hidden || !resumePicker.hidden;
   settingsTrigger.disabled = activeTurn || checking || hydrating;
-  send.disabled = activeTurn || !ready || focusedView;
-  prompt.disabled = !ready || focusedView;
+  send.disabled = activeTurn || hydrating || !ready || focusedView;
+  prompt.disabled = hydrating || !ready || focusedView;
 }
 
 function authorization() { return { "Authorization": `Bearer ${appliedConfiguration.token}` }; }
@@ -504,7 +504,17 @@ async function revalidateCachedThread() {
     if (!response.ok) throw new Error();
     const result = await response.json(); state = canonicalResumeState(result); olderCursor = result.olderCursor; persistedThreadConfiguration = true; saveState(); renderPreTurnConfiguration(); drawMessages({ forceFollow: true }); setStatus("");
   } catch {
-    state = { threadId: null, messages: [] }; olderCursor = null; persistedThreadConfiguration = false; saveState(); drawMessages({ forceFollow: true }); setStatus("The saved Thread is unavailable; started a new Thread.");
+    state = { threadId: null, messages: [], localNew: true, preTurnConfiguration: null };
+    olderCursor = null;
+    persistedThreadConfiguration = false;
+    saveState();
+    drawMessages({ forceFollow: true });
+    setStatus("The saved Thread is unavailable; returned to a new view.");
+    try {
+      await resolvePreTurnConfiguration();
+    } catch {
+      // The composer remains available; the first Turn will retry resolution.
+    }
   } finally { hydrating = false; setThreadControls(); }
 }
 
