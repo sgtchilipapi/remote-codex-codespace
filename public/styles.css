@@ -144,6 +144,11 @@ main.settings-open #resume-picker { display: none; }
 
 .failure-feedback, .message.error, #settings-error, #configuration-error, #resume-error, .history-error { overflow-wrap: anywhere; }
 .failure-action, .failure-copy { display: block; margin-top: 8px; max-width: 100%; white-space: normal; }
+.device-auth-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; margin-top: 10px; padding-top: 10px; border-top: 1px solid currentColor; }
+.device-auth-progress { grid-column: 1 / -1; margin: 0; }
+.device-auth-card a, .device-auth-card code, .device-auth-card button { min-height: 44px; display: flex; align-items: center; overflow-wrap: anywhere; white-space: normal; }
+.device-auth-card a { grid-column: 1 / -1; }
+.device-auth-card code { padding: 8px; font-size: 1rem; }
 .failure-feedback details, .message.error details, #settings-error details, #configuration-error details, #resume-error details, .history-error details { margin-top: 8px; color: var(--muted); }
 .failure-feedback summary, .message.error summary, #settings-error summary, #configuration-error summary, #resume-error summary, .history-error summary { cursor: pointer; }
 

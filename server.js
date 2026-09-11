@@ -3,6 +3,7 @@ const { EventEmitter } = require("node:events");
 const { spawn } = require("node:child_process");
 const { createHash, randomUUID } = require("node:crypto");
 const { StringDecoder } = require("node:string_decoder");
+const { DeviceAuthManager } = require("./device-auth");
 const {
   version: FAILURE_VERSION,
   sources: FAILURE_COPY,
@@ -253,11 +254,11 @@ async function readConfiguration(codex) {
   };
 }
 
-function createRelay({ appServer, env = process.env, turnRetentionMs = TURN_RETENTION_MS, maxBufferedBytes = MAX_BUFFERED_BYTES, maxSubscribersPerTurn = 8, maxRetainedTurns = 100, logger = null, codespaceProbe, run: relayRun } = {}) {
+function createRelay({ appServer, env = process.env, turnRetentionMs = TURN_RETENTION_MS, maxBufferedBytes = MAX_BUFFERED_BYTES, maxSubscribersPerTurn = 8, maxRetainedTurns = 100, logger = null, codespaceProbe, run: relayRun, deviceAuthTimeoutMs, deviceAuthRetentionMs, deviceAuthMaxOutputBytes } = {}) {
   if (!Number.isSafeInteger(maxBufferedBytes) || maxBufferedBytes < CONTROL_EVENT_RESERVE_BYTES) throw new Error(`maxBufferedBytes must be at least ${CONTROL_EVENT_RESERVE_BYTES}`);
   if (!Number.isSafeInteger(maxSubscribersPerTurn) || maxSubscribersPerTurn < 1) throw new Error("maxSubscribersPerTurn must be positive");
   if (!Number.isSafeInteger(maxRetainedTurns) || maxRetainedTurns < 1) throw new Error("maxRetainedTurns must be positive");
-  const app = express(); const workdir = env.CODESPACE_WORKDIR || "/workspaces/remote-codex-codespace"; const run = relayRun || createRun(env); const probeCodespace = codespaceProbe || createCodespaceProbe(env); const codex = appServer || new AppServerConnection({ run }); const turns = new Map(); const configurationRevisions = new Map(); const threadSnapshots = new Map(); let currentAvailabilityRevision = null; let selectedThreadId = null; let preTurnSnapshot = null; let accountSnapshot = null; app.locals.appServer = codex;
+  const app = express(); const workdir = env.CODESPACE_WORKDIR || "/workspaces/remote-codex-codespace"; const run = relayRun || createRun(env); const probeCodespace = codespaceProbe || createCodespaceProbe(env); const codex = appServer || new AppServerConnection({ run }); const deviceAuth = new DeviceAuthManager({ run, timeoutMs: deviceAuthTimeoutMs, retentionMs: deviceAuthRetentionMs, maxOutputBytes: deviceAuthMaxOutputBytes }); const turns = new Map(); const configurationRevisions = new Map(); const threadSnapshots = new Map(); let currentAvailabilityRevision = null; let selectedThreadId = null; let preTurnSnapshot = null; let accountSnapshot = null; app.locals.appServer = codex;
   const onRelayNotification = ({ method, params = {} }) => {
     const observedAt = new Date().toISOString();
     if (method === "account/rateLimits/updated") {
@@ -301,6 +302,7 @@ function createRelay({ appServer, env = process.env, turnRetentionMs = TURN_RETE
     let code = options.code || "upstream_failure";
     if (error?.kind === "dependency_missing") { source = "relay"; code = "dependency_missing"; }
     else if (error?.kind === "malformed_response") { source = "relay"; code = "malformed_response"; }
+    else if (error?.kind === "output_limit_exceeded") { source = "relay"; code = "output_limit_exceeded"; }
     else if (error?.kind === "upstream_timeout" || error?.status === 504) { source = "relay"; code = "upstream_timeout"; }
     else if (error?.kind === "upstream_disconnected") { source = "unknown"; code = "upstream_disconnected"; }
     else if (error?.kind === "codex_request") { source = "codex"; code = error.details?.jsonRpcCode === -32001 ? "server_overloaded" : "protocol_rejected"; }
@@ -371,6 +373,7 @@ function createRelay({ appServer, env = process.env, turnRetentionMs = TURN_RETE
     if (req.path === "/configuration") return "settings.check";
     if (req.path === "/configuration/resolve") return "configuration.resolve";
     if (req.path === "/status") return "status.read";
+    if (req.path === "/codex/device-auth" || req.path.startsWith("/codex/device-auth/")) return "codex.authenticate";
     if (req.path === "/threads") return "thread.list";
     if (/\/history$/.test(req.path)) return "thread.history";
     if (/\/resume$/.test(req.path)) return "thread.resume";
@@ -397,6 +400,15 @@ function createRelay({ appServer, env = process.env, turnRetentionMs = TURN_RETE
     }
   };
   app.get("/configuration", authorize, route("configuration.load", async (_req, res) => res.json(await readConfiguration(codex))));
+  app.post("/codex/device-auth", authorize, route("codex.authenticate", async (_req, res) => {
+    res.status(202).json(await deviceAuth.start());
+  }));
+  app.get("/codex/device-auth/:attemptId", authorize, route("codex.authenticate", async (req, res) => {
+    if (!UUID.test(req.params.attemptId)) throw new RelayError(400, "Invalid device authentication attempt ID");
+    const attempt = deviceAuth.get(req.params.attemptId);
+    if (!attempt) throw new RelayError(404, "Device authentication attempt not found", { code: "state_conflict" });
+    res.json(attempt);
+  }));
   app.post("/configuration/resolve", authorize, route("configuration.resolve", async (req, res) => {
     const availability = await readConfiguration(codex);
     const draft = req.body || {};

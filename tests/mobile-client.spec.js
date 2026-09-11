@@ -958,12 +958,23 @@ test("an invalid source and code pair uses safe fallback copy", async ({ page })
   await expect(page.locator("body")).not.toContainText("Attacker-controlled failure prose");
 });
 
-test("Codex authentication uses its own recovery target", async ({ page }) => {
+test("Codex authentication shows safe Open and Copy actions and preserves client state", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 568 });
   await page.addInitScript(() => {
-    window.open = (url) => { window.__openedRecoveryUrl = String(url); };
+    Object.defineProperty(navigator, "clipboard", { value: { writeText: async (value) => { window.__copiedCode = value; } } });
+  });
+  let polls = 0;
+  await page.route("**/codex/device-auth", (route) => route.fulfill({ status: 202, json: {
+    attemptId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", status: "pending",
+    verificationUrl: "https://auth.openai.com/codex/device", userCode: "ABCD-EF12",
+  } }));
+  await page.route("**/codex/device-auth/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", (route) => {
+    polls += 1;
+    return route.fulfill({ json: { attemptId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", status: "succeeded" } });
   });
   await installStreamingTurn(page);
   await openConfiguredClient(page);
+  const configurationBefore = await page.evaluate(() => localStorage.relayConfiguration);
   await page.getByLabel("Prompt").fill("Authenticate");
   await page.locator("#composer").evaluate((form) => form.requestSubmit());
   await expect.poll(() => page.evaluate(() => Boolean(window.__pushTurnEvent))).toBe(true);
@@ -978,8 +989,36 @@ test("Codex authentication uses its own recovery target", async ({ page }) => {
   }));
 
   await page.getByRole("button", { name: "Authenticate Codex" }).click();
-  await expect.poll(() => page.evaluate(() => window.__openedRecoveryUrl)).toBe("https://chatgpt.com/codex");
+  await expect(page.getByRole("link", { name: "Open login page" })).toHaveAttribute("href", "https://auth.openai.com/codex/device");
+  await expect(page.getByText("ABCD-EF12", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Copy code" }).click();
+  expect(await page.evaluate(() => window.__copiedCode)).toBe("ABCD-EF12");
+  await expect(page.locator(".device-auth-progress")).toContainText("Codex authentication succeeded.");
+  expect(polls).toBeGreaterThan(0);
+  expect(await page.evaluate(() => localStorage.relayConfiguration)).toBe(configurationBefore);
+  expect(await page.evaluate(() => document.querySelector(".device-auth-card").scrollWidth <= document.querySelector(".device-auth-card").clientWidth)).toBe(true);
 });
+
+for (const terminalStatus of ["expired", "failed"]) {
+  test(`Codex authentication polling announces ${terminalStatus}`, async ({ page }) => {
+    const attemptId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    await page.route("**/codex/device-auth", (route) => route.fulfill({ status: 202, json: {
+      attemptId, status: "pending", verificationUrl: "https://auth.openai.com/codex/device", userCode: "SAFE-CODE",
+    } }));
+    await page.route(`**/codex/device-auth/${attemptId}`, (route) => route.fulfill({ json: { attemptId, status: terminalStatus } }));
+    await installStreamingTurn(page);
+    await openConfiguredClient(page);
+    await page.getByLabel("Prompt").fill("Authenticate");
+    await page.locator("#composer").evaluate((form) => form.requestSubmit());
+    await expect.poll(() => page.evaluate(() => Boolean(window.__pushTurnEvent))).toBe(true);
+    await page.evaluate(() => window.__pushTurnEvent({ type: "error", id: "relay:auth", failure: {
+      version: 1, source: "codex", code: "authentication_rejected", operation: "turn.stream", retryable: false,
+      message: "Codex authentication was rejected. Authenticate Codex, then retry.", action: "authenticate_codex",
+    } }));
+    await page.getByRole("button", { name: "Authenticate Codex" }).click();
+    await expect(page.locator(".device-auth-progress")).toHaveText(`Codex authentication ${terminalStatus}.`);
+  });
+}
 
 test("repairable subscription failure preserves the accepted Turn for replay", async ({ page }) => {
   await installStreamingTurn(page);

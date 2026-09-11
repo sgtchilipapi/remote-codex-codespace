@@ -68,7 +68,6 @@
     recoveryTargets: {
       start_codespace: "https://github.com/codespaces",
       authenticate_github: "https://github.com/login",
-      authenticate_codex: "https://chatgpt.com/codex",
     },
     codexErrorCodes: {
       contextWindowExceeded: "context_window_exceeded",

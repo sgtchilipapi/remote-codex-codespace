@@ -121,11 +121,50 @@ function actionLabel(action) {
   })[action] || "";
 }
 
-function failureAction(failure, retry) {
+function validDeviceAuthStart(value) {
+  if (!value || value.status !== "pending" || typeof value.attemptId !== "string" || !/^[0-9a-f-]{36}$/i.test(value.attemptId)
+      || typeof value.verificationUrl !== "string" || typeof value.userCode !== "string" || !/^[A-Z0-9-]{1,32}$/.test(value.userCode)) return false;
+  try { const url = new URL(value.verificationUrl); return url.protocol === "https:" && url.hostname === "auth.openai.com" && !url.username && !url.password; }
+  catch { return false; }
+}
+
+async function startCodexAuthentication(container) {
+  const trigger = container.querySelector(".failure-action");
+  if (trigger) trigger.disabled = true;
+  try {
+    const response = await fetch("/codex/device-auth", { method: "POST", headers: authorization() });
+    if (!response.ok) throw await responseError(response, "codex.authenticate");
+    const attempt = await response.json().catch(() => { throw failureError(malformedFailure("codex.authenticate")); });
+    if (!validDeviceAuthStart(attempt)) throw failureError(malformedFailure("codex.authenticate"));
+    const card = document.createElement("div"); card.className = "device-auth-card";
+    const progress = document.createElement("p"); progress.className = "device-auth-progress"; progress.setAttribute("role", "status"); progress.setAttribute("aria-live", "polite"); progress.textContent = "Codex authentication pending.";
+    const link = document.createElement("a"); link.href = attempt.verificationUrl; link.target = "_blank"; link.rel = "noopener noreferrer"; link.textContent = "Open login page";
+    const code = document.createElement("code"); code.textContent = attempt.userCode;
+    const copy = document.createElement("button"); copy.type = "button"; copy.textContent = "Copy code";
+    copy.addEventListener("click", async () => { await navigator.clipboard.writeText(attempt.userCode); copy.textContent = "Code copied"; });
+    card.append(progress, link, code, copy); container.append(card);
+    while (card.isConnected) {
+      await wait(1000);
+      const polled = await fetch(`/codex/device-auth/${attempt.attemptId}`, { headers: authorization() });
+      if (!polled.ok) throw await responseError(polled, "codex.authenticate");
+      const result = await polled.json().catch(() => { throw failureError(malformedFailure("codex.authenticate")); });
+      if (!result || result.attemptId !== attempt.attemptId || !["pending", "succeeded", "expired", "failed"].includes(result.status)) throw failureError(malformedFailure("codex.authenticate"));
+      if (result.status === "pending") continue;
+      progress.textContent = result.status === "succeeded" ? "Codex authentication succeeded." : result.status === "expired" ? "Codex authentication expired." : "Codex authentication failed.";
+      if (result.status === "succeeded" && state.activeTurn?.awaitingRecovery) void followActiveTurn();
+      return;
+    }
+  } catch (error) {
+    renderFailure(container, error.failure || connectionFailure("codex.authenticate"), { retry: () => startCodexAuthentication(container) });
+  } finally { if (trigger?.isConnected) trigger.disabled = false; }
+}
+
+function failureAction(failure, retry, container) {
   if (["retry", "reconnect"].includes(failure.action)) return retry;
   if (failure.action === "open_settings") return () => setSettingsOpen(true, settingsHeading);
   if (failure.action === "change_configuration") return openConfiguration;
   if (failure.action === "start_new_thread") return () => newThread.click();
+  if (failure.action === "authenticate_codex") return () => startCodexAuthentication(container);
   if (RECOVERY_TARGETS[failure.action]) return () => window.open(RECOVERY_TARGETS[failure.action], "_blank", "noopener,noreferrer");
   return null;
 }
@@ -137,7 +176,7 @@ function renderFailure(container, failure, { retry = null, announce = true } = {
   message.className = "failure-message";
   message.textContent = failureText(normalized);
   container.append(message);
-  const action = failureAction(normalized, retry);
+  const action = failureAction(normalized, retry, container);
   if (action && actionLabel(normalized.action)) {
     const button = document.createElement("button");
     button.type = "button";
