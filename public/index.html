@@ -10,9 +10,24 @@
 <main id="app-shell">
   <header>
     <h1>Codex Relay</h1>
-    <button id="new" type="button">New</button>
-    <button id="resume" type="button">Resume</button>
-    <button id="configure" type="button">Configure</button>
+    <button id="new" class="icon-button header-action-inverted" type="button" aria-label="New" title="New">
+      <svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <path d="M12 5v14M5 12h14"></path>
+      </svg>
+    </button>
+    <button id="resume" class="icon-button" type="button" aria-label="Resume" title="Resume">
+      <svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 12a9 9 0 1 0 3-6.7L3 8"></path>
+        <path d="M3 3v5h5M12 7v5l3 2"></path>
+      </svg>
+    </button>
+    <button id="configure" class="icon-button" type="button" aria-label="Configure" title="Configure" aria-expanded="false" aria-controls="configuration">
+      <svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <path d="M4 7h5M15 7h5M4 17h9M19 17h1"></path>
+        <circle cx="12" cy="7" r="3"></circle>
+        <circle cx="16" cy="17" r="3"></circle>
+      </svg>
+    </button>
     <button id="settings-trigger" class="icon-button" type="button" aria-label="Settings" title="Settings">
       <svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
         <circle cx="12" cy="12" r="3"></circle>

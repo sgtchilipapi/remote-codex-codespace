@@ -397,9 +397,10 @@ function setConfigurationOpen(open, focusTarget = null) {
   configuration.hidden = !open;
   shell.classList.toggle("configuration-open", open);
   configure.hidden = open && !appliedConfiguration;
-  configure.textContent = open ? "Cancel" : "Configure";
   configure.setAttribute("aria-expanded", String(open));
-  configure.setAttribute("aria-controls", "configuration");
+  const configureLabel = open ? "Close configuration" : "Configure";
+  configure.setAttribute("aria-label", configureLabel);
+  configure.title = configureLabel;
   if (open) renderConfigurationDraft();
   setThreadControls();
   if (focusTarget) requestAnimationFrame(() => focusTarget.focus());

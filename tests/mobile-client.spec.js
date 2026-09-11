@@ -1388,6 +1388,46 @@ test("compact controls expose labels, visible focus, live status, and usable tar
   await expect(page.getByLabel("Permissions")).toBeVisible();
 });
 
+test("Thread header actions use accessible icon buttons with an inverted New action", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 568 });
+  await openConfiguredClient(page);
+
+  const newAction = page.getByRole("button", { name: "New", exact: true });
+  const resumeAction = page.getByRole("button", { name: "Resume", exact: true });
+  const configureAction = page.locator("#configure");
+
+  for (const [action, title] of [[newAction, "New"], [resumeAction, "Resume"], [configureAction, "Configure"]]) {
+    await expect(action).toHaveAttribute("title", title);
+    await expect(action.locator("svg")).toHaveCount(1);
+    await expect(action.locator("svg")).toHaveAttribute("aria-hidden", "true");
+    expect((await action.innerText()).trim()).toBe("");
+    expect(await action.evaluate((button) => {
+      const bounds = button.getBoundingClientRect();
+      return { width: bounds.width, height: bounds.height };
+    })).toEqual({ width: 44, height: 44 });
+  }
+
+  expect(await newAction.evaluate((button) => ({
+    backgroundColor: getComputedStyle(button).backgroundColor,
+    borderWidth: getComputedStyle(button).borderWidth,
+    color: getComputedStyle(button).color,
+  }))).toEqual({ backgroundColor: "rgba(0, 0, 0, 0)", borderWidth: "0px", color: "rgb(229, 231, 235)" });
+
+  await expect(configureAction).toHaveAttribute("aria-expanded", "false");
+  await configureAction.click();
+  await expect(configureAction).toHaveAttribute("aria-expanded", "true");
+  await expect(configureAction).toHaveAttribute("aria-label", "Close configuration");
+  await expect(configureAction).toHaveAttribute("title", "Close configuration");
+  await expect(configureAction.locator("svg")).toHaveCount(1);
+  await expect(page.getByRole("heading", { name: "Configuration" })).toBeFocused();
+  await configureAction.click();
+  await expect(configureAction).toHaveAttribute("aria-expanded", "false");
+  await expect(configureAction).toHaveAttribute("aria-label", "Configure");
+  await expect(configureAction).toHaveAttribute("title", "Configure");
+  await expect(configureAction.locator("svg")).toHaveCount(1);
+  await expect(configureAction).toBeFocused();
+});
+
 test("the shell declares dynamic viewport, safe-area, and reduced-motion support", async ({ page }) => {
   await openConfiguredClient(page);
   await expect(page.locator('meta[name="viewport"]')).toHaveAttribute("content", /viewport-fit=cover/);

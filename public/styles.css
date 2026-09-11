@@ -260,6 +260,11 @@ main.settings-open #resume-picker { display: none; }
   padding: 0;
 }
 
+.header-action-inverted {
+  color: var(--text);
+  background: transparent;
+}
+
 @media (max-width: 599px) {
   main { gap: 8px; }
   main.configuration-open #configuration { flex: 1 1 auto; max-height: none; }
