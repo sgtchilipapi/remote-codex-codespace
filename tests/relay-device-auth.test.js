@@ -101,9 +101,13 @@ test("device authentication exposes failed and expired terminal states and stops
   failedRelay.children[0].stdout.write("https://auth.openai.com/codex/device Enter code FAIL-1234");
   const failedAttempt = await (await failedStart).json();
   failedRelay.children[0].emit("close", 7, null);
-  assert.deepEqual(await (await fetch(`${failedRelay.base}/codex/device-auth/${failedAttempt.attemptId}`, authorized())).json(), {
-    attemptId: failedAttempt.attemptId, status: "failed",
-  });
+  const failedResult = await (await fetch(`${failedRelay.base}/codex/device-auth/${failedAttempt.attemptId}`, authorized())).json();
+  assert.equal(failedResult.attemptId, failedAttempt.attemptId);
+  assert.equal(failedResult.status, "failed");
+  assert.equal(failedResult.failure.operation, "codex.authenticate");
+  assert.equal(failedResult.failure.source, "unknown");
+  assert.equal(failedResult.failure.code, "upstream_failure");
+  assert.match(failedResult.failure.diagnosticId, /^[0-9a-f-]{36}$/i);
 
   const expiredRelay = await serve({ deviceAuthTimeoutMs: 20 }); t.after(expiredRelay.close);
   const expiredStart = fetch(`${expiredRelay.base}/codex/device-auth`, authorized({ method: "POST" }));
@@ -115,6 +119,19 @@ test("device authentication exposes failed and expired terminal states and stops
     attemptId: expiredAttempt.attemptId, status: "expired",
   });
   assert.equal(expiredRelay.children[0].killCalls, 1);
+});
+
+test("terminal attempts are discarded after bounded retention", async (t) => {
+  const relay = await serve({ deviceAuthRetentionMs: 20 }); t.after(relay.close);
+  const started = fetch(`${relay.base}/codex/device-auth`, authorized({ method: "POST" }));
+  await waitForChild(relay);
+  relay.children[0].stdout.write("https://auth.openai.com/codex/device Enter code DONE-1234");
+  const attempt = await (await started).json();
+  relay.children[0].emit("close", 0, null);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  const discarded = await fetch(`${relay.base}/codex/device-auth/${attempt.attemptId}`, authorized());
+  assert.equal(discarded.status, 404);
+  assert.equal((await discarded.json()).failure.operation, "codex.authenticate");
 });
 
 test("malformed, overflowing, timed-out, spawn, and ambiguous exit failures stay safe", async (t) => {

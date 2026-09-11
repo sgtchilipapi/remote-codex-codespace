@@ -407,6 +407,7 @@ function createRelay({ appServer, env = process.env, turnRetentionMs = TURN_RETE
     if (!UUID.test(req.params.attemptId)) throw new RelayError(400, "Invalid device authentication attempt ID");
     const attempt = deviceAuth.get(req.params.attemptId);
     if (!attempt) throw new RelayError(404, "Device authentication attempt not found", { code: "state_conflict" });
+    if (attempt.status === "failed") attempt.failure = deviceAuth.failureFor(req.params.attemptId, (error) => classifyFailure(error, "codex.authenticate"));
     res.json(attempt);
   }));
   app.post("/configuration/resolve", authorize, route("configuration.resolve", async (req, res) => {

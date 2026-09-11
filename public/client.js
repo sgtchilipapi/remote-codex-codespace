@@ -151,6 +151,12 @@ async function startCodexAuthentication(container) {
       if (!result || result.attemptId !== attempt.attemptId || !["pending", "succeeded", "expired", "failed"].includes(result.status)) throw failureError(malformedFailure("codex.authenticate"));
       if (result.status === "pending") continue;
       progress.textContent = result.status === "succeeded" ? "Codex authentication succeeded." : result.status === "expired" ? "Codex authentication expired." : "Codex authentication failed.";
+      if (result.status === "failed") {
+        const failure = normalizeFailure(result.failure, "codex.authenticate");
+        const details = document.createElement("div"); details.className = "device-auth-failure";
+        renderFailure(details, failure, { retry: () => startCodexAuthentication(container), announce: false });
+        card.append(details);
+      }
       if (result.status === "succeeded" && state.activeTurn?.awaitingRecovery) void followActiveTurn();
       return;
     }

@@ -49,14 +49,14 @@ class DeviceAuthManager {
 
   start() {
     if (this.active && this.active.status === "pending") return this.active.ready;
-    const attempt = { id: randomUUID(), status: "pending", child: null, output: "", bytes: 0, settled: false };
+    const attempt = { id: randomUUID(), status: "pending", child: null, output: "", bytes: 0, readySettled: false };
     attempt.ready = new Promise((resolve, reject) => { attempt.resolveReady = resolve; attempt.rejectReady = reject; });
     this.attempts.set(attempt.id, attempt);
     this.active = attempt;
 
     const failBeforeReady = (error) => {
-      if (attempt.settled) return;
-      attempt.settled = true;
+      if (attempt.readySettled) return;
+      attempt.readySettled = true;
       attempt.status = "failed";
       this.active = null;
       clearTimeout(attempt.timeout);
@@ -72,8 +72,8 @@ class DeviceAuthManager {
       }
       attempt.output += chunk.toString("utf8");
       const parsed = parseDeviceAuthOutput(attempt.output);
-      if (parsed && !attempt.settled) {
-        attempt.settled = true;
+      if (parsed && !attempt.readySettled) {
+        attempt.readySettled = true;
         Object.assign(attempt, parsed);
         attempt.output = "";
         attempt.resolveReady(this.publicStart(attempt));
@@ -89,18 +89,22 @@ class DeviceAuthManager {
     attempt.child.stdout?.on("data", consume);
     attempt.child.stderr?.on("data", consume);
     attempt.child.once("error", () => failBeforeReady(new DeviceAuthError("dependency_missing")));
-    attempt.child.once("close", (exitCode) => {
-      if (!attempt.settled) return failBeforeReady(new DeviceAuthError("malformed_response"));
+    attempt.child.once("close", (exitCode, signal) => {
+      if (!attempt.readySettled) return failBeforeReady(new DeviceAuthError("malformed_response"));
       if (attempt.status !== "pending") return;
       clearTimeout(attempt.timeout);
       attempt.status = exitCode === 0 ? "succeeded" : "failed";
+      if (attempt.status === "failed") {
+        attempt.terminalError = new DeviceAuthError("upstream_failure");
+        attempt.terminalError.details = { exitCode, signal };
+      }
       this.active = null;
       this.retain(attempt);
     });
     attempt.timeout = setTimeout(() => {
       if (attempt.status !== "pending") return;
       attempt.child?.kill();
-      if (!attempt.settled) return failBeforeReady(new DeviceAuthError("upstream_timeout", 504));
+      if (!attempt.readySettled) return failBeforeReady(new DeviceAuthError("upstream_timeout", 504));
       attempt.status = "expired";
       this.active = null;
       this.retain(attempt);
@@ -113,6 +117,13 @@ class DeviceAuthManager {
     const attempt = this.attempts.get(id);
     if (!attempt) return null;
     return { attemptId: attempt.id, status: attempt.status };
+  }
+
+  failureFor(id, createFailure) {
+    const attempt = this.attempts.get(id);
+    if (!attempt?.terminalError) return null;
+    attempt.publicFailure ||= createFailure(attempt.terminalError);
+    return attempt.publicFailure;
   }
 
   publicStart(attempt) {

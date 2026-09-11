@@ -988,6 +988,7 @@ test("Codex authentication shows safe Open and Copy actions and preserves client
     },
   }));
 
+  const stateBeforeAuthentication = await page.evaluate(() => localStorage.relay);
   await page.getByRole("button", { name: "Authenticate Codex" }).click();
   await expect(page.getByRole("link", { name: "Open login page" })).toHaveAttribute("href", "https://auth.openai.com/codex/device");
   await expect(page.getByText("ABCD-EF12", { exact: true })).toBeVisible();
@@ -996,6 +997,7 @@ test("Codex authentication shows safe Open and Copy actions and preserves client
   await expect(page.locator(".device-auth-progress")).toContainText("Codex authentication succeeded.");
   expect(polls).toBeGreaterThan(0);
   expect(await page.evaluate(() => localStorage.relayConfiguration)).toBe(configurationBefore);
+  expect(await page.evaluate(() => localStorage.relay)).toBe(stateBeforeAuthentication);
   expect(await page.evaluate(() => document.querySelector(".device-auth-card").scrollWidth <= document.querySelector(".device-auth-card").clientWidth)).toBe(true);
 });
 
@@ -1005,7 +1007,13 @@ for (const terminalStatus of ["expired", "failed"]) {
     await page.route("**/codex/device-auth", (route) => route.fulfill({ status: 202, json: {
       attemptId, status: "pending", verificationUrl: "https://auth.openai.com/codex/device", userCode: "SAFE-CODE",
     } }));
-    await page.route(`**/codex/device-auth/${attemptId}`, (route) => route.fulfill({ json: { attemptId, status: terminalStatus } }));
+    await page.route(`**/codex/device-auth/${attemptId}`, (route) => route.fulfill({ json: {
+      attemptId, status: terminalStatus,
+      ...(terminalStatus === "failed" ? { failure: {
+        version: 1, source: "unknown", code: "upstream_failure", operation: "codex.authenticate", retryable: true,
+        message: "An upstream operation failed. Retry it.", action: "retry", diagnosticId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      } } : {}),
+    } }));
     await installStreamingTurn(page);
     await openConfiguredClient(page);
     await page.getByLabel("Prompt").fill("Authenticate");
@@ -1017,6 +1025,7 @@ for (const terminalStatus of ["expired", "failed"]) {
     } }));
     await page.getByRole("button", { name: "Authenticate Codex" }).click();
     await expect(page.locator(".device-auth-progress")).toHaveText(`Codex authentication ${terminalStatus}.`);
+    if (terminalStatus === "failed") await expect(page.locator(".device-auth-failure")).toContainText("Unknown · An upstream operation failed.");
   });
 }
 
