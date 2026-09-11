@@ -60,6 +60,7 @@ async function installStreamingTurn(page) {
         return Response.json({ configuration: { model: "codex-1", reasoning: "medium", permissions: "workspace-write", fastMode: false, serviceTier: null }, configurationRevision: "stream-revision" });
       }
       if (url.pathname === "/turn") {
+        window.__turnStartRequests = (window.__turnStartRequests || 0) + 1;
         window.__turnRequest = JSON.parse(init.body);
         return Response.json({ turnId: window.__turnRequest.turnId, eventsUrl: `/turn/${window.__turnRequest.turnId}/events` }, { status: 202 });
       }
@@ -1028,6 +1029,37 @@ for (const terminalStatus of ["expired", "failed"]) {
     if (terminalStatus === "failed") await expect(page.locator(".device-auth-failure")).toContainText("Unknown · An upstream operation failed.");
   });
 }
+
+test("authentication success resumes the same recoverable Turn and preserves drafts", async ({ page }) => {
+  const attemptId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  await page.route("**/codex/device-auth", (route) => route.fulfill({ status: 202, json: {
+    attemptId, status: "pending", verificationUrl: "https://auth.openai.com/codex/device", userCode: "KEEP-1234",
+  } }));
+  await page.route(`**/codex/device-auth/${attemptId}`, (route) => route.fulfill({ json: { attemptId, status: "succeeded" } }));
+  await installStreamingTurn(page);
+  await openConfiguredClient(page);
+  await page.getByRole("button", { name: "Configure" }).click();
+  await page.locator("#model").selectOption("codex-mini");
+  await page.evaluate(() => setConfigurationOpen(false));
+  await page.evaluate(() => {
+    window.__turnRecoveryFailure = {
+      version: 1, source: "codex", code: "authentication_rejected", operation: "turn.recover", retryable: false,
+      message: "Codex authentication was rejected. Authenticate Codex, then retry.", action: "authenticate_codex", httpStatus: 502,
+    };
+  });
+  await page.getByLabel("Prompt").fill("Accepted prompt");
+  await page.locator("#composer").evaluate((form) => form.requestSubmit());
+  await expect(page.getByRole("button", { name: "Authenticate Codex" })).toBeVisible();
+  const acceptedTurnId = await page.evaluate(() => JSON.parse(localStorage.relay).activeTurn.id);
+  await page.getByLabel("Prompt").fill("Unsent draft");
+
+  await page.getByRole("button", { name: "Authenticate Codex" }).click();
+  await expect(page.locator("#status")).toHaveText("Codex is working…");
+  expect(await page.evaluate(() => JSON.parse(localStorage.relay).activeTurn.id)).toBe(acceptedTurnId);
+  expect(await page.evaluate(() => window.__turnStartRequests)).toBe(1);
+  await expect(page.getByLabel("Prompt")).toHaveValue("Unsent draft");
+  await expect(page.locator("#model")).toHaveValue("codex-mini");
+});
 
 test("repairable subscription failure preserves the accepted Turn for replay", async ({ page }) => {
   await installStreamingTurn(page);
