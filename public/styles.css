@@ -139,6 +139,13 @@ main.settings-open #resume-picker { display: none; }
 .resume-preview, .resume-meta { color: #374151; font-size: 14px; overflow-wrap: anywhere; }
 #load-more-threads { width: 100%; margin-top: 8px; }
 #load-older-history { width: 100%; margin-bottom: 8px; }
+.history-error { margin-bottom: 8px; padding: 10px; border: 1px solid var(--danger); border-radius: 8px; color: var(--danger); }
+.history-error[hidden] { display: none; }
+
+.failure-feedback, .message.error, #settings-error, #configuration-error, #resume-error, .history-error { overflow-wrap: anywhere; }
+.failure-action, .failure-copy { display: block; margin-top: 8px; max-width: 100%; white-space: normal; }
+.failure-feedback details, .message.error details, #settings-error details, #configuration-error details, #resume-error details, .history-error details { margin-top: 8px; color: var(--muted); }
+.failure-feedback summary, .message.error summary, #settings-error summary, #configuration-error summary, #resume-error summary, .history-error summary { cursor: pointer; }
 
 .configuration-grid {
   display: grid;

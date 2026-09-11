@@ -104,7 +104,12 @@ test("ineligible, malformed, and oversized inputs fail without disclosure", asyn
   assert.equal((await request(app, "/threads/not-a-uuid/resume", { method: "POST" })).status, 400);
   const unavailable = await request(app, `/threads/${uuid}/resume`, { method: "POST" });
   assert.equal(unavailable.status, 404);
-  assert.deepEqual(await unavailable.json(), { error: "Thread not found" });
+  const unavailableBody = await unavailable.json();
+  assert.equal(unavailableBody.error, "That Thread is no longer available.");
+  assert.deepEqual({ ...unavailableBody.failure, diagnosticId: "opaque" }, {
+    version: 1, source: "relay", code: "state_conflict", operation: "thread.resume", retryable: false,
+    message: "That Thread is no longer available.", action: "start_new_thread", diagnosticId: "opaque",
+  });
   assert.equal((await request(app, `/threads?cursor=${"x".repeat(4097)}`)).status, 400);
 });
 
@@ -128,7 +133,10 @@ test("history de-duplicates inclusive anchors and keeps errors safe", async () =
     nextCursor: null,
   } };
   const response = await request(createRelay({ appServer, env: { API_TOKEN: "secret", CODESPACE_WORKDIR: "/repo" } }), `/threads/${uuid}/history?cursor=cursor&anchorId=anchor`);
-  assert.deepEqual(await response.json(), { messages: [{ id: "err", role: "assistant", text: "Error: safe failure", error: true }], olderCursor: null });
+  const body = await response.json();
+  assert.deepEqual(body, { messages: [{ id: "err", role: "assistant", text: "Codex reported an item error.", error: true }], olderCursor: null });
+  assert.equal(JSON.stringify(body).includes("safe failure"), false);
+  assert.equal(JSON.stringify(body).includes("/secret/path"), false);
 });
 
 test("an explicit configuration overrides a resumed Thread on its next Turn", async () => {

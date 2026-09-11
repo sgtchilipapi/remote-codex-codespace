@@ -64,6 +64,11 @@ async function installStreamingTurn(page) {
         return Response.json({ turnId: window.__turnRequest.turnId, eventsUrl: `/turn/${window.__turnRequest.turnId}/events` }, { status: 202 });
       }
       if (!/\/turn\/[^/]+\/events$/.test(url.pathname)) return originalFetch(input, init);
+      if (window.__turnRecoveryFailure) {
+        const failure = window.__turnRecoveryFailure;
+        window.__turnRecoveryFailure = null;
+        return Response.json({ error: failure.message, failure }, { status: failure.httpStatus || 502 });
+      }
       if (window.__rejectTurnRecovery) return Response.json({ error: "Turn not found" }, { status: 404 });
       const stream = new ReadableStream({
         start(controller) {
@@ -305,7 +310,7 @@ test("an unavailable persisted Thread recovers to a composer-enabled local New v
 
   await expect(page.getByLabel("Prompt")).toBeEnabled();
   await expect(page.getByText("Cached answer", { exact: true })).toBeHidden();
-  await expect(page.getByRole("status").filter({ hasText: "saved Thread is unavailable" })).toContainText("returned to a new view");
+  await expect(page.getByRole("status").filter({ hasText: "saved Thread is unavailable" })).toContainText("Returned to a new view");
   await expect(page.getByRole("status", { name: "Pre-Turn configuration" })).toContainText("Model: Codex 1");
   expect(mutations).toEqual(["resume", "resolve"]);
   expect(await page.evaluate(() => JSON.parse(localStorage.relay))).toEqual({
@@ -327,7 +332,14 @@ test("the first local Turn retries an obsolete revision with a newly resolved sn
     window.__turnAttempts = 0;
     window.fetch = async (input, init) => {
       const url = new URL(input, location.href);
-      if (url.pathname === "/turn" && window.__turnAttempts++ === 0) return Response.json({ error: "Configuration revision is obsolete" }, { status: 409 });
+      if (url.pathname === "/turn" && window.__turnAttempts++ === 0) return Response.json({
+        error: "Configuration options changed. Refresh them and try again.",
+        failure: {
+          version: 1, source: "relay", code: "configuration_obsolete", operation: "turn.create",
+          retryable: true, message: "Configuration options changed. Refresh them and try again.", action: "change_configuration",
+          diagnosticId: "baae26b1-655a-4842-b2cd-64e54a2f5207",
+        },
+      }, { status: 409 });
       return originalFetch(input, init);
     };
   });
@@ -529,9 +541,66 @@ test("failed Settings validation handles a network failure without changing auth
   await page.getByLabel("API token").fill("rejected-draft");
   await page.getByRole("button", { name: "Save and connect" }).click();
 
-  await expect(page.getByRole("alert")).toContainText("unavailable");
+  await expect(page.getByRole("alert")).toContainText("could not be reached");
   await expect(page.getByLabel("API token")).toHaveValue("valid-token");
   expect(await page.evaluate(() => JSON.parse(localStorage.relayConfiguration))).toEqual(appliedConfiguration);
+});
+
+test("structured Settings feedback exposes source, recovery, and diagnostic identity without losing authenticated state", async ({ page }) => {
+  let requestCount = 0;
+  await page.addInitScript((configuration) => localStorage.setItem("relayConfiguration", JSON.stringify(configuration)), appliedConfiguration);
+  await page.route("**/configuration", (route) => {
+    requestCount += 1;
+    if (requestCount === 1) return route.fulfill({ json: modelInfo });
+    return route.fulfill({ status: 401, json: {
+      error: "The API token was rejected. Check it and try again.",
+      failure: {
+        version: 1, source: "relay", code: "authentication_rejected", operation: "settings.check",
+        retryable: false, message: "The API token was rejected. Check it and try again.", action: "open_settings",
+        diagnosticId: "f7f24e7c-fca4-4516-ae1d-2b8203818fb1",
+      },
+    } });
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByLabel("API token").fill("rejected-draft");
+  await page.getByRole("button", { name: "Save and connect" }).click();
+
+  const feedback = page.locator("#settings-error");
+  await expect(feedback).toContainText("Relay · The API token was rejected");
+  await expect(feedback.getByRole("button", { name: "Open Settings" })).toBeVisible();
+  await feedback.getByText("Details").click();
+  await expect(feedback.getByRole("button", { name: /Copy diagnostic ID f7f24/ })).toBeVisible();
+  await expect(page.getByLabel("API token")).toHaveValue("valid-token");
+  expect(await page.evaluate(() => JSON.parse(localStorage.relayConfiguration))).toEqual(appliedConfiguration);
+});
+
+test("transient reload revalidation keeps the cached Thread locked with Retry and New actions", async ({ page }) => {
+  await page.addInitScript(({ configuration, threadId }) => {
+    localStorage.setItem("relayConfiguration", JSON.stringify(configuration));
+    localStorage.setItem("relay", JSON.stringify({ threadId, messages: [{ id: "cached", role: "assistant", text: "Cached answer" }] }));
+  }, { configuration: appliedConfiguration, threadId: resumableThreadId });
+  await page.route("**/configuration", (route) => route.fulfill({ json: modelInfo }));
+  await page.route(`**/threads/${resumableThreadId}/resume`, (route) => route.fulfill({ status: 504, json: {
+    error: "Relay timed out waiting for the upstream operation. Retry it.",
+    failure: {
+      version: 1, source: "relay", code: "upstream_timeout", operation: "thread.revalidate",
+      retryable: true, message: "Relay timed out waiting for the upstream operation. Retry it.", action: "retry",
+      diagnosticId: "179836c0-155c-4d23-9b7f-d16ac1d4a99b",
+    },
+  } }));
+
+  await page.goto("/");
+
+  await expect(page.getByText("Cached answer", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Prompt")).toBeDisabled();
+  await expect(page.locator("#status")).toContainText("Relay · Relay timed out");
+  await expect(page.locator("#status").getByRole("button", { name: "Retry" })).toBeVisible();
+  await expect(page.locator("#status").getByRole("button", { name: "New Thread" })).toBeVisible();
+  expect(await page.evaluate(() => JSON.parse(localStorage.relay))).toEqual({
+    threadId: resumableThreadId,
+    messages: [{ id: "cached", role: "assistant", text: "Cached answer" }],
+  });
 });
 
 test("Configuration retains field validation after authentication moves to Settings", async ({ page }) => {
@@ -596,6 +665,7 @@ test("Configuration keeps an unsupported draft and shows stable server field err
 
   await expect(page.getByLabel("Fast mode")).toHaveValue("on");
   await expect(page.getByLabel("Fast mode")).toHaveAttribute("aria-invalid", "true");
+  await expect(page.getByLabel("Fast mode")).toBeFocused();
   await expect(page.locator("#fast-mode-error")).toContainText("not supported");
   expect(await page.evaluate(() => JSON.parse(localStorage.relayConfiguration))).toEqual(appliedConfiguration);
 });
@@ -723,7 +793,7 @@ test("an initial Status failure shows unavailable fields and one Retry action", 
   await expect(page.locator("#status")).toContainText("Model: Unavailable");
   await expect(page.locator("#status")).toContainText("May be outdated");
   await expect(page.locator("#status")).not.toContainText("private detail");
-  await expect(page.getByRole("button", { name: "Retry status" })).toHaveCount(1);
+  await expect(page.locator("#status").getByRole("button", { name: "Retry" })).toHaveCount(1);
 });
 
 test("a failed Turn restores locked actions without stealing prompt focus", async ({ page }) => {
@@ -737,7 +807,7 @@ test("a failed Turn restores locked actions without stealing prompt focus", asyn
 
   await page.evaluate(() => window.__pushTurnEvent({ type: "error", message: "Turn failed" }));
 
-  await expect(page.getByText("Error: Turn failed", { exact: true })).toBeVisible();
+  await expect(page.locator(".message.error")).toContainText("Unknown · The Turn failed");
   await expect(page.getByRole("button", { name: "New" })).toBeEnabled();
   await expect(page.getByRole("button", { name: "Configure" })).toBeEnabled();
   await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
@@ -837,11 +907,104 @@ test("a failed Turn keeps interrupted output and a separate replay-safe error", 
   });
 
   await expect(page.locator(".message.interrupted")).toContainText("PartialInterrupted");
-  await expect(page.locator(".message.error")).toHaveText("Error: Disconnected");
-  expect(await page.evaluate(() => JSON.parse(localStorage.relay).messages.map(({ text }) => text))).toEqual(["Try", "Error: Disconnected"]);
+  await expect(page.locator(".message.error")).toContainText("Unknown · The Turn failed");
+  expect(await page.evaluate(() => JSON.parse(localStorage.relay).messages.map(({ text }) => text))).toEqual(["Try", "Unknown · The Turn failed."]);
 });
 
-test("partial output disappears when Turn recovery is unavailable", async ({ page }) => {
+test("a structured terminal Turn failure is actionable, private-detail free, and announced once", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 568 });
+  await installStreamingTurn(page);
+  await openConfiguredClient(page);
+  await page.getByLabel("Prompt").fill("A prompt that must be preserved");
+  await page.locator("#composer").evaluate((form) => form.requestSubmit());
+  await expect.poll(() => page.evaluate(() => Boolean(window.__pushTurnEvent))).toBe(true);
+  await page.evaluate(() => window.__pushTurnEvent({
+    type: "error",
+    id: "relay:turn:error",
+    message: "The context window is full. This Turn stopped. Start a new Thread or shorten the prompt.",
+    failure: {
+      version: 1, source: "codex", code: "context_window_exceeded", operation: "turn.stream",
+      retryable: false, message: "The context window is full. This Turn stopped. Start a new Thread or shorten the prompt.",
+      action: "start_new_thread", diagnosticId: "77b0aed7-3d61-4542-af60-e2248fb078aa",
+    },
+    privateCause: "token=/secret path=/workspaces/private",
+  }));
+
+  const feedback = page.locator('.message.error[data-item-id="relay:turn:error"]');
+  await expect(feedback).toContainText("Codex · The context window is full");
+  await expect(feedback.getByRole("button", { name: "New Thread" })).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(1);
+  await expect(page.locator("#status")).toHaveText("Turn failed.");
+  await expect(page.locator("#status")).not.toContainText("context window is full");
+  await expect(feedback).not.toContainText("/secret");
+  expect(await feedback.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+});
+
+test("an invalid source and code pair uses safe fallback copy", async ({ page }) => {
+  await page.addInitScript((configuration) => {
+    localStorage.setItem("relayConfiguration", JSON.stringify(configuration));
+  }, appliedConfiguration);
+  await page.route("**/configuration", (route) => route.fulfill({ status: 502, json: {
+    error: "private legacy detail",
+    failure: {
+      version: 1, source: "connection", code: "turn_failed", operation: "settings.check",
+      retryable: true, message: "Attacker-controlled failure prose", action: "retry",
+    },
+  } }));
+
+  await page.goto("/");
+
+  await expect(page.locator("#settings-error")).toContainText("Unknown · The settings check operation could not be completed.");
+  await expect(page.locator("body")).not.toContainText("Attacker-controlled failure prose");
+});
+
+test("Codex authentication uses its own recovery target", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.open = (url) => { window.__openedRecoveryUrl = String(url); };
+  });
+  await installStreamingTurn(page);
+  await openConfiguredClient(page);
+  await page.getByLabel("Prompt").fill("Authenticate");
+  await page.locator("#composer").evaluate((form) => form.requestSubmit());
+  await expect.poll(() => page.evaluate(() => Boolean(window.__pushTurnEvent))).toBe(true);
+  await page.evaluate(() => window.__pushTurnEvent({
+    type: "error",
+    id: "relay:turn:auth-error",
+    failure: {
+      version: 1, source: "codex", code: "authentication_rejected", operation: "turn.stream",
+      retryable: false, message: "Codex authentication was rejected. Authenticate Codex, then retry.",
+      action: "authenticate_codex",
+    },
+  }));
+
+  await page.getByRole("button", { name: "Authenticate Codex" }).click();
+  await expect.poll(() => page.evaluate(() => window.__openedRecoveryUrl)).toBe("https://chatgpt.com/codex");
+});
+
+test("repairable subscription failure preserves the accepted Turn for replay", async ({ page }) => {
+  await installStreamingTurn(page);
+  await openConfiguredClient(page);
+  await page.evaluate(() => {
+    window.__turnRecoveryFailure = {
+      version: 1, source: "relay", code: "authentication_rejected", operation: "turn.recover",
+      retryable: false, message: "The API token was rejected. Check it and try again.",
+      action: "open_settings", httpStatus: 401,
+    };
+  });
+  await page.getByLabel("Prompt").fill("Preserve this accepted Turn");
+  await page.locator("#composer").evaluate((form) => form.requestSubmit());
+
+  await expect(page.getByRole("button", { name: "Open Settings" })).toBeVisible();
+  const acceptedTurnId = await page.evaluate(() => JSON.parse(localStorage.relay).activeTurn.id);
+  await page.getByRole("button", { name: "Open Settings" }).click();
+  await page.getByRole("button", { name: "Save and connect" }).click();
+  await expect.poll(() => page.evaluate(() => Boolean(window.__pushTurnEvent))).toBe(true);
+  expect(await page.evaluate(() => JSON.parse(localStorage.relay).activeTurn.id)).toBe(acceptedTurnId);
+  await page.evaluate(() => window.__finishTurn());
+  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.relay).activeTurn)).toBeNull();
+});
+
+test("significant partial output remains interrupted when Turn recovery is unavailable", async ({ page }) => {
   await installStreamingTurn(page);
   await openConfiguredClient(page);
   await page.getByLabel("Prompt").fill("Try");
@@ -853,9 +1016,12 @@ test("partial output disappears when Turn recovery is unavailable", async ({ pag
     window.__dropTurn();
   });
 
-  await expect(page.getByText("Temporary", { exact: true })).toHaveCount(0);
-  await expect(page.getByRole("status")).toContainText("Turn recovery unavailable");
-  expect(await page.evaluate(() => JSON.parse(localStorage.relay).messages.map(({ text }) => text))).toEqual(["Try"]);
+  await expect(page.locator(".message.interrupted")).toContainText("TemporaryInterrupted");
+  await expect(page.getByRole("status")).toContainText("This Turn is no longer retained");
+  expect(await page.evaluate(() => JSON.parse(localStorage.relay).messages.map(({ text, interrupted }) => ({ text, interrupted: Boolean(interrupted) })))).toEqual([
+    { text: "Try", interrupted: false },
+    { text: "Temporary", interrupted: true },
+  ]);
 });
 
 test("the composer grows to its viewport cap and New resets it", async ({ page }) => {

@@ -89,6 +89,7 @@
   <div id="pre-turn-configuration" role="status" aria-live="polite" aria-atomic="true" aria-label="Pre-Turn configuration" hidden></div>
   <div id="messages" aria-label="Thread messages">
     <button id="load-older-history" type="button" hidden>Retry loading older history</button>
+    <div id="history-error" class="history-error" tabindex="-1" hidden></div>
   </div>
   <div id="status" role="status" aria-live="polite" aria-atomic="true"></div>
   <form id="composer">
@@ -104,5 +105,6 @@
     </button>
   </form>
 </main>
+<script src="/failure-catalog.js"></script>
 <script src="/client.js"></script>
 </html>

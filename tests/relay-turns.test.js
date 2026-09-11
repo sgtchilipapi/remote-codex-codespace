@@ -90,11 +90,15 @@ test("Configuration resolution validates a whole draft with stable field errors"
   }));
 
   assert.equal(response.status, 400);
-  assert.deepEqual(await response.json(), { error: "Configuration is unsupported", fieldErrors: {
+  const body = await response.json();
+  assert.equal(body.error, "The Configuration is not supported. Check the highlighted values.");
+  assert.deepEqual(body.fieldErrors, {
     reasoning: "Reasoning effort is not supported by the selected model.",
     permissions: "Permissions choice is not supported.",
     fastMode: "Fast mode is not supported by the selected model.",
-  } });
+  });
+  assert.equal(body.failure.code, "configuration_unsupported");
+  assert.deepEqual(body.failure.fieldErrors, body.fieldErrors);
 });
 
 test("a resolved Configuration carries Fast mode into the first Turn exactly once", async (t) => {
@@ -134,7 +138,10 @@ test("an obsolete Configuration revision is rejected before a Thread starts", as
   const stale = await start(relay.base, { turnId: relayTurnId, prompt: "Use the snapshot", configurationRevision: firstRevision });
 
   assert.equal(stale.status, 409);
-  assert.deepEqual(await stale.json(), { error: "Configuration revision is obsolete" });
+  const body = await stale.json();
+  assert.equal(body.failure.code, "configuration_obsolete");
+  assert.equal(body.failure.operation, "turn.create");
+  assert.equal(body.failure.action, "change_configuration");
   assert.equal(appServer.calls.some(({ method }) => method === "thread/start" || method === "turn/start"), false);
 });
 
@@ -239,7 +246,11 @@ test("Status keeps confirmed values stale after a refresh failure and clears sna
   const result = await stale.json();
   assert.equal(result.rateLimits.weekly.remainingPercent.value, 60);
   assert.equal(result.rateLimits.weekly.remainingPercent.stale, true);
-  assert.deepEqual(result.errors, [{ source: "rate_limits", reason: "upstream_unavailable", retryable: true }]);
+  assert.equal(result.errors.length, 1);
+  assert.deepEqual({ ...result.errors[0], diagnosticId: "opaque" }, {
+    version: 1, source: "unknown", code: "upstream_failure", operation: "status.read", retryable: true,
+    message: "An upstream operation failed. Retry it.", action: "retry", diagnosticId: "opaque",
+  });
   assert.equal(JSON.stringify(result).includes("private"), false);
 
   appServer.emit("disconnect", new Error("gone"));
@@ -253,7 +264,10 @@ test("Status rejects an empty upstream response when it has no confirmed value",
 
   const response = await fetch(`${relay.base}/status`, authorized());
   assert.equal(response.status, 502);
-  assert.deepEqual(await response.json(), { error: "Codex unavailable" });
+  const body = await response.json();
+  assert.equal(body.failure.source, "relay");
+  assert.equal(body.failure.code, "internal_failure");
+  assert.equal(body.failure.operation, "status.read");
 });
 
 test("a sparse rate-limit notification preserves untouched field freshness", async (t) => {
@@ -316,12 +330,16 @@ test("a Turn carries item identity through deltas, completions, and Codex errors
 
   const response = await fetch(`${relay.base}/turn/${relayTurnId}/events`, authorized());
   const events = (await response.text()).trim().split("\n").map(JSON.parse);
-  assert.deepEqual(events.slice(1).map(({ sequence: _sequence, ...event }) => event), [
+  const publicEvents = events.slice(1).map(({ sequence: _sequence, ...event }) => event);
+  assert.deepEqual(publicEvents.slice(0, 3), [
     { type: "item.delta", item: { id: "assistant-1", type: "agent_message", delta: "Draft" } },
     { type: "item.completed", item: { id: "assistant-1", type: "agent_message", text: "Final" } },
-    { type: "item.completed", item: { id: "error-1", type: "error", text: "Tool failed" } },
-    { type: "relay.turn.finished", status: "failed" },
+    { type: "item.completed", item: { id: "error-1", type: "error", text: "Codex reported an item error." } },
   ]);
+  assert.equal(publicEvents[3].type, "error");
+  assert.equal(publicEvents[3].failure.code, "turn_failed");
+  assert.deepEqual(publicEvents[4], { type: "relay.turn.finished", status: "failed" });
+  assert.equal(JSON.stringify(events).includes("Tool failed"), false);
 });
 
 test("activity is normalized, deduplicated, and cleared around assistant output", async (t) => {
@@ -396,11 +414,12 @@ test("buffer overflow interrupts Codex and leaves a safe terminal replay", async
   emit(appServer, "item/completed", { item: { id: "assistant-large", type: "agentMessage", text: "x".repeat(4096) } });
   await new Promise((resolve) => setImmediate(resolve));
   const replay = await fetch(`${relay.base}/turn/${relayTurnId}/events`, authorized());
-  assert.deepEqual((await replay.text()).trim().split("\n").map(JSON.parse), [
-    { type: "thread.started", thread_id: threadId, sequence: 1 },
-    { type: "error", id: `relay:${relayTurnId}:error`, message: "Turn output exceeded the Relay buffer limit", sequence: 2 },
-    { type: "relay.turn.finished", status: "failed", sequence: 3 },
-  ]);
+  const events = (await replay.text()).trim().split("\n").map(JSON.parse);
+  assert.deepEqual(events[0], { type: "thread.started", thread_id: threadId, sequence: 1 });
+  assert.equal(events[1].failure.source, "relay");
+  assert.equal(events[1].failure.code, "output_limit_exceeded");
+  assert.equal(events[1].message, events[1].failure.message);
+  assert.deepEqual(events[2], { type: "relay.turn.finished", status: "failed", sequence: 3 });
   assert.equal(appServer.calls.some(({ method }) => method === "turn/interrupt"), true);
 });
 
@@ -410,11 +429,13 @@ test("app-server failure terminates the Turn and releases concurrency", async (t
   await start(relay.base);
   appServer.emit("disconnect", new Error("private SSH detail"));
   let replay = await fetch(`${relay.base}/turn/${relayTurnId}/events`, authorized());
-  assert.deepEqual((await replay.text()).trim().split("\n").map(JSON.parse), [
-    { type: "thread.started", thread_id: threadId, sequence: 1 },
-    { type: "error", id: `relay:${relayTurnId}:error`, message: "Codex unavailable", sequence: 2 },
-    { type: "relay.turn.finished", status: "failed", sequence: 3 },
-  ]);
+  const events = (await replay.text()).trim().split("\n").map(JSON.parse);
+  assert.equal(events[1].failure.source, "unknown");
+  assert.equal(events[1].failure.code, "upstream_disconnected");
+  assert.equal(events[1].failure.retryable, false);
+  assert.equal(events[1].failure.action, "none");
+  assert.equal(JSON.stringify(events).includes("private SSH detail"), false);
+  assert.deepEqual(events[2], { type: "relay.turn.finished", status: "failed", sequence: 3 });
   assert.equal((await start(relay.base, { turnId: "22222222-2222-4222-8222-222222222222", prompt: "Retry" })).status, 202);
 });
 
@@ -461,7 +482,10 @@ test("an app-server initialization timeout is discarded so Settings can reconnec
 
   const timedOut = await fetch(`${relay.base}/configuration`, authorized());
   assert.equal(timedOut.status, 504);
-  assert.deepEqual(await timedOut.json(), { error: "Codex timed out" });
+  const timeoutBody = await timedOut.json();
+  assert.equal(timeoutBody.failure.source, "relay");
+  assert.equal(timeoutBody.failure.code, "upstream_timeout");
+  assert.equal(timeoutBody.failure.operation, "configuration.load");
 
   const retry = await fetch(`${relay.base}/configuration`, authorized());
   assert.equal(retry.status, 200);

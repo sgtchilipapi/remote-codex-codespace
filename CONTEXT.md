@@ -55,3 +55,7 @@ _Avoid_: Response stream, combined answer
 **Activity bubble**:
 The temporary, non-transcript Mobile Client indicator of the current Turn activity, derived from structured Codex lifecycle events and removed when the activity ends.
 _Avoid_: Thinking trace, reasoning bubble, status message
+
+**Failure feedback**:
+Sanitized information shown by the Mobile Client for a failed operation. It identifies the failure source, stable condition, retryability, and user action without exposing internal details.
+_Avoid_: Catch-all status, raw upstream error

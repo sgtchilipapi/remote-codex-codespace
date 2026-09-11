@@ -39,6 +39,7 @@ const fastModeError = document.querySelector("#fast-mode-error");
 const preTurnAnnouncement = document.querySelector("#pre-turn-configuration");
 const messages = document.querySelector("#messages");
 const loadOlderHistory = document.querySelector("#load-older-history");
+const historyError = document.querySelector("#history-error");
 const status = document.querySelector("#status");
 const composer = document.querySelector("#composer");
 const prompt = document.querySelector("#prompt");
@@ -73,6 +74,92 @@ let userScrollIntent = false;
 let readingAnchor = null;
 let lastAnnouncedActivity = null;
 let lastStatusSnapshot = null;
+let threadRecoveryLocked = false;
+const announcedFailureIds = new Set();
+
+const FAILURE_VERSION = window.FailureCatalog.version;
+const FAILURE_CATALOG = window.FailureCatalog.sources;
+const FAILURE_ACTIONS = new Set(window.FailureCatalog.actions);
+const SOURCE_LABELS = window.FailureCatalog.sourceLabels;
+const RECOVERY_TARGETS = window.FailureCatalog.recoveryTargets;
+
+function localFailure(source, code, operation, message, action = "none", retryable = false) {
+  return { version: FAILURE_VERSION, source, code, operation, retryable, message, action };
+}
+
+function malformedFailure(operation) {
+  return localFailure("relay", "malformed_response", operation, "Relay returned an invalid response. Retry the operation.", "retry", true);
+}
+
+function normalizeFailure(candidate, operation) {
+  if (!candidate || candidate.version !== FAILURE_VERSION || typeof candidate.source !== "string" || typeof candidate.code !== "string"
+      || typeof candidate.operation !== "string" || typeof candidate.retryable !== "boolean" || typeof candidate.message !== "string"
+      || !FAILURE_ACTIONS.has(candidate.action)) return malformedFailure(operation);
+  const known = Boolean(FAILURE_CATALOG[candidate.source]?.[candidate.code]);
+  return {
+    version: FAILURE_VERSION,
+    source: known ? candidate.source : "unknown",
+    code: candidate.code,
+    operation: candidate.operation,
+    retryable: candidate.retryable,
+    message: known ? candidate.message : `The ${operation.replace(".", " ")} operation could not be completed.`,
+    action: candidate.action,
+    ...(typeof candidate.diagnosticId === "string" && /^[0-9a-f-]{36}$/i.test(candidate.diagnosticId) ? { diagnosticId: candidate.diagnosticId } : {}),
+    ...(candidate.fieldErrors && typeof candidate.fieldErrors === "object" && !Array.isArray(candidate.fieldErrors) ? { fieldErrors: candidate.fieldErrors } : {}),
+  };
+}
+
+function failureText(failure) {
+  return `${SOURCE_LABELS[failure.source] || "Unknown"} · ${failure.message}`;
+}
+
+function actionLabel(action) {
+  return ({
+    retry: "Retry", reconnect: "Reconnect", open_settings: "Open Settings", change_configuration: "Change Configuration",
+    start_codespace: "Start Codespace", authenticate_github: "Authenticate GitHub", authenticate_codex: "Authenticate Codex",
+    start_new_thread: "New Thread",
+  })[action] || "";
+}
+
+function failureAction(failure, retry) {
+  if (["retry", "reconnect"].includes(failure.action)) return retry;
+  if (failure.action === "open_settings") return () => setSettingsOpen(true, settingsHeading);
+  if (failure.action === "change_configuration") return openConfiguration;
+  if (failure.action === "start_new_thread") return () => newThread.click();
+  if (RECOVERY_TARGETS[failure.action]) return () => window.open(RECOVERY_TARGETS[failure.action], "_blank", "noopener,noreferrer");
+  return null;
+}
+
+function renderFailure(container, failure, { retry = null, announce = true } = {}) {
+  const normalized = normalizeFailure(failure, failure?.operation || "unknown");
+  container.replaceChildren();
+  const message = document.createElement("span");
+  message.className = "failure-message";
+  message.textContent = failureText(normalized);
+  container.append(message);
+  const action = failureAction(normalized, retry);
+  if (action && actionLabel(normalized.action)) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "failure-action";
+    button.textContent = actionLabel(normalized.action);
+    button.addEventListener("click", action);
+    container.append(button);
+  }
+  if (normalized.diagnosticId) {
+    const details = document.createElement("details");
+    const summary = document.createElement("summary"); summary.textContent = "Details";
+    const copy = document.createElement("button"); copy.type = "button"; copy.className = "failure-copy"; copy.textContent = `Copy diagnostic ID ${normalized.diagnosticId}`;
+    copy.addEventListener("click", async () => { await navigator.clipboard.writeText(normalized.diagnosticId); copy.textContent = "Diagnostic ID copied"; });
+    details.append(summary, copy); container.append(details);
+  }
+  const identity = normalized.diagnosticId || `${normalized.operation}:${normalized.source}:${normalized.code}`;
+  if (announce && !announcedFailureIds.has(identity)) {
+    container.setAttribute("role", "alert");
+    announcedFailureIds.add(identity);
+  } else container.removeAttribute("role");
+  return normalized;
+}
 
 function readJson(key, fallback) {
   try { return JSON.parse(localStorage.getItem(key)) || fallback; }
@@ -108,7 +195,7 @@ function readAppliedConfiguration() {
 function saveState() {
   const persisted = state.activeTurn ? state : {
     ...state,
-    messages: state.messages.filter((message) => !message.interrupted && !message.provisional),
+    messages: state.messages.filter((message) => (!message.interrupted || message.retainInterrupted) && !message.provisional),
   };
   localStorage.setItem("relay", JSON.stringify(persisted));
 }
@@ -117,6 +204,20 @@ function saveAppliedConfiguration() {
 }
 
 function setStatus(message) { status.textContent = message; }
+
+function showStatusFailure(failure, retry = null, allowNew = false) {
+  status.replaceChildren();
+  const feedback = document.createElement("div");
+  feedback.className = "status-details failure-feedback";
+  renderFailure(feedback, failure, { retry });
+  status.append(feedback);
+  if (allowNew && failure.action !== "start_new_thread") {
+    const button = document.createElement("button");
+    button.type = "button"; button.className = "failure-action"; button.textContent = "New Thread";
+    button.addEventListener("click", () => newThread.click());
+    status.append(button);
+  }
+}
 
 function statusField(field, format = (value) => String(value)) {
   return field && Object.hasOwn(field, "value") ? format(field.value) : "Unavailable";
@@ -163,10 +264,15 @@ function renderStatusSnapshot(snapshot, forceStale = false) {
     const observed = fields.filter((field) => field?.observedAt).map((field) => new Date(field.observedAt).valueOf()).filter(Number.isFinite);
     const updated = observed.length ? new Date(Math.max(...observed)).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }) : "unknown";
     add("Last updated", updated);
-    const warning = document.createElement("div"); warning.className = "status-warning"; warning.textContent = "May be outdated · Status refresh failed."; lines.append(warning);
+    const warning = document.createElement("div"); warning.className = "status-warning";
+    if (snapshot.errors?.[0]) {
+      const failure = normalizeFailure(snapshot.errors[0], "status.read");
+      renderFailure(warning, { ...failure, message: `May be outdated. ${failure.message}` }, { retry: refreshStatus, announce: false });
+    } else warning.textContent = "May be outdated · Status refresh failed.";
+    lines.append(warning);
   }
   status.append(lines);
-  if (stale) {
+  if (stale && !snapshot.errors?.length) {
     const retry = document.createElement("button"); retry.type = "button"; retry.className = "status-retry"; retry.textContent = "Retry"; retry.setAttribute("aria-label", "Retry status"); retry.addEventListener("click", refreshStatus); status.append(retry);
   }
 }
@@ -177,19 +283,20 @@ async function refreshStatus() {
   try {
     const query = state.threadId ? `?threadId=${encodeURIComponent(state.threadId)}` : "";
     const response = await fetch(`/status${query}`, { headers: authorization() });
-    if (!response.ok) throw new Error("Status is unavailable. Try again.");
-    const snapshot = await response.json();
-    if (snapshot?.scope?.threadId !== expectedThreadId || !snapshot.configuration || !snapshot.rateLimits) throw new Error("Status is unavailable. Try again.");
+    if (!response.ok) throw await responseError(response, "status.read");
+    const snapshot = await response.json().catch(() => { throw failureError(malformedFailure("status.read")); });
+    if (snapshot?.scope?.threadId !== expectedThreadId || !snapshot.configuration || !snapshot.rateLimits) throw failureError(malformedFailure("status.read"));
+    snapshot.errors = (snapshot.errors || []).map((failure) => normalizeFailure(failure, "status.read"));
     lastStatusSnapshot = snapshot;
     renderStatusSnapshot(snapshot);
-  } catch {
+  } catch (error) {
     if (lastStatusSnapshot?.scope?.threadId === expectedThreadId) renderStatusSnapshot(lastStatusSnapshot, true);
     else renderStatusSnapshot({
       scope: { threadId: expectedThreadId },
       configuration: { model: {}, reasoning: {}, permissions: {}, fastMode: {} },
       context: expectedThreadId ? {} : { reason: "not_started" },
       rateLimits: { fiveHour: { remainingPercent: {}, resetsAt: {} }, weekly: { remainingPercent: {}, resetsAt: {} } },
-      errors: [{ source: "status", reason: "upstream_unavailable", retryable: true }],
+      errors: [error.failure || connectionFailure("status.read")],
     }, true);
   }
 }
@@ -224,13 +331,17 @@ function resolutionRequest(candidate) {
 }
 
 async function resolvePreTurnConfiguration() {
-  const response = await fetch("/configuration/resolve", {
-    method: "POST",
-    headers: { ...authorization(), "Content-Type": "application/json" },
-    body: JSON.stringify(resolutionRequest(appliedConfiguration)),
-  });
-  if (!response.ok) throw await responseError(response);
-  const resolved = await response.json();
+  let response;
+  try {
+    response = await fetch("/configuration/resolve", {
+      method: "POST",
+      headers: { ...authorization(), "Content-Type": "application/json" },
+      body: JSON.stringify(resolutionRequest(appliedConfiguration)),
+    });
+  } catch { throw failureError(connectionFailure("configuration.resolve")); }
+  if (!response.ok) throw await responseError(response, "configuration.resolve");
+  const resolved = await response.json().catch(() => { throw failureError(malformedFailure("configuration.resolve")); });
+  if (!resolved?.configuration || typeof resolved.configurationRevision !== "string") throw failureError(malformedFailure("configuration.resolve"));
   state.preTurnConfiguration = resolved;
   saveState();
   renderPreTurnConfiguration();
@@ -269,12 +380,12 @@ function setThreadControls() {
   const locked = checking || activeTurn || hydrating;
   const focusedView = !settings.hidden || !configuration.hidden || !resumePicker.hidden;
   newThread.disabled = locked || !ready || focusedView;
-  resumeThread.disabled = locked || !ready || focusedView;
+  resumeThread.disabled = locked || threadRecoveryLocked || !ready || focusedView;
   showStatus.disabled = checking || hydrating || !ready;
-  configure.disabled = locked || !ready || !settings.hidden || !resumePicker.hidden;
+  configure.disabled = locked || threadRecoveryLocked || !ready || !settings.hidden || !resumePicker.hidden;
   settingsTrigger.disabled = activeTurn || checking || hydrating;
-  send.disabled = activeTurn || hydrating || !ready || focusedView;
-  prompt.disabled = hydrating || !ready || focusedView;
+  send.disabled = activeTurn || hydrating || threadRecoveryLocked || !ready || focusedView;
+  prompt.disabled = hydrating || threadRecoveryLocked || !ready || focusedView;
 }
 
 function authorization() { return { "Authorization": `Bearer ${appliedConfiguration.token}` }; }
@@ -288,8 +399,11 @@ function setResumeOpen(open, restoreFocus = true) {
   else if (restoreFocus) requestAnimationFrame(() => resumeThread.focus());
 }
 
-function displayResumeError(message) {
-  resumeError.textContent = message;
+function displayResumeError(failure, retry = null) {
+  const normalized = typeof failure === "string"
+    ? localFailure("unknown", "upstream_failure", "thread.list", failure, "retry", true)
+    : failure;
+  renderFailure(resumeError, normalized, { retry });
   resumeError.hidden = false;
   requestAnimationFrame(() => resumeError.focus());
 }
@@ -323,20 +437,22 @@ async function loadThreads(append = false) {
   hydrating = true; setThreadControls(); resumeStatus.textContent = append ? "Loading more Threads…" : "Loading Threads…"; resumeError.hidden = true;
   try {
     const query = new URLSearchParams(); if (append && resumeCursor) query.set("cursor", resumeCursor); if (state.threadId) query.set("currentThreadId", state.threadId);
-    const response = await fetch(`/threads?${query}`, { headers: authorization() }); if (!response.ok) throw new Error("Threads could not be loaded. Try again.");
-    const result = await response.json(); renderThreadRows(result.threads, append); resumeCursor = result.nextCursor;
+    const response = await fetch(`/threads?${query}`, { headers: authorization() }); if (!response.ok) throw await responseError(response, "thread.list");
+    const result = await response.json().catch(() => { throw failureError(malformedFailure("thread.list")); });
+    if (!Array.isArray(result?.threads)) throw failureError(malformedFailure("thread.list"));
+    renderThreadRows(result.threads, append); resumeCursor = result.nextCursor;
     resumeStatus.textContent = !append && !result.threads.length ? "No Threads to resume" : ""; loadMoreThreads.textContent = "Load more"; loadMoreThreads.dataset.retry = ""; loadMoreThreads.hidden = !resumeCursor;
-  } catch (error) { displayResumeError(error.message); resumeStatus.textContent = ""; loadMoreThreads.textContent = "Retry"; loadMoreThreads.dataset.retry = "true"; loadMoreThreads.hidden = false; }
+  } catch (error) { displayResumeError(error.failure || connectionFailure("thread.list"), () => loadThreads(append)); resumeStatus.textContent = ""; loadMoreThreads.textContent = "Retry"; loadMoreThreads.dataset.retry = "true"; loadMoreThreads.hidden = false; }
   finally { hydrating = false; setThreadControls(); }
 }
 
 async function selectThread(id, row) {
   hydrating = true; setThreadControls(); for (const button of resumeResults.querySelectorAll("button")) button.disabled = true; resumeStatus.textContent = "Loading Thread…"; resumeError.hidden = true;
   try {
-    const response = await fetch(`/threads/${id}/resume`, { method: "POST", headers: authorization() }); if (!response.ok) throw new Error(response.status === 404 ? "That Thread is no longer available." : "Thread could not be resumed. Try again.");
-    const result = await response.json(); const resumedState = canonicalResumeState(result); state = resumedState; olderCursor = result.olderCursor; persistedThreadConfiguration = true; saveState(); followThread = true; renderPreTurnConfiguration(); drawMessages({ forceFollow: true });
+    const response = await fetch(`/threads/${id}/resume`, { method: "POST", headers: authorization() }); if (!response.ok) throw await responseError(response, "thread.resume");
+    const result = await response.json().catch(() => { throw failureError(malformedFailure("thread.resume")); }); const resumedState = canonicalResumeState(result); state = resumedState; olderCursor = result.olderCursor; persistedThreadConfiguration = true; threadRecoveryLocked = false; saveState(); followThread = true; renderPreTurnConfiguration(); drawMessages({ forceFollow: true });
     setResumeOpen(false); requestAnimationFrame(() => prompt.focus()); setStatus(resumedState.effectiveConfiguration.model ? `Resumed · ${resumedState.effectiveConfiguration.model}` : "Resumed");
-  } catch (error) { displayResumeError(error.message); if (/no longer/.test(error.message)) row.remove(); }
+  } catch (error) { const failure = error.failure || connectionFailure("thread.resume"); displayResumeError(failure, () => selectThread(id, row)); if (failure.action === "start_new_thread") row.remove(); }
   finally { hydrating = false; setThreadControls(); for (const button of resumeResults.querySelectorAll("button")) button.disabled = button.textContent.includes("Current"); }
 }
 
@@ -373,10 +489,13 @@ function clearSettingsError() {
   token.removeAttribute("aria-invalid");
 }
 
-function showSettingsError(message) {
-  settingsError.textContent = message;
+function showSettingsError(failure, retry = null) {
+  const normalized = typeof failure === "string"
+    ? localFailure("unknown", "upstream_failure", "settings.check", failure, "retry", true)
+    : failure;
+  renderFailure(settingsError, normalized, { retry });
   settingsError.hidden = false;
-  tokenError.textContent = message;
+  tokenError.textContent = normalized.message;
   token.setAttribute("aria-invalid", "true");
   requestAnimationFrame(() => settingsError.focus());
 }
@@ -390,15 +509,18 @@ function clearConfigurationError() {
   }
 }
 
-function showConfigurationError(message, field = null) {
-  configurationError.textContent = message;
+function showConfigurationError(failure, field = null, retry = null) {
+  const normalized = typeof failure === "string"
+    ? localFailure("unknown", "upstream_failure", "configuration.resolve", failure, "retry", true)
+    : failure;
+  renderFailure(configurationError, normalized, { retry });
   configurationError.hidden = false;
   const fieldError = [...configurationFields.values()].find(({ control }) => control === field);
   if (fieldError) {
-    fieldError.error.textContent = message;
+    if (!fieldError.error.textContent) fieldError.error.textContent = normalized.message;
     field.setAttribute("aria-invalid", "true");
   }
-  requestAnimationFrame(() => configurationError.focus());
+  requestAnimationFrame(() => (field || configurationError).focus());
 }
 
 function renderConfigurationDraft() {
@@ -500,36 +622,22 @@ function validateDraft(candidate, modelInfo) {
   return null;
 }
 
-function configurationFailure(message, field = null) {
-  const error = new Error(message);
-  error.field = field;
-  return error;
-}
-
 async function fetchConfigurationCatalog(configurationToken) {
   let response;
   try {
     response = await fetch("/configuration", { headers: { "Authorization": `Bearer ${configurationToken}` } });
   } catch {
-    throw configurationFailure("Relay or Codespace information is unavailable. Try again.");
+    throw failureError(connectionFailure("settings.check"));
   }
 
-  if (!response.ok) {
-    if (response.status === 401) {
-      throw configurationFailure("The API token was rejected. Check it and try again.", token);
-    }
-    if (response.status === 502) {
-      throw configurationFailure("Relay or Codespace information is unavailable. Try again.");
-    }
-    throw configurationFailure("Configuration could not be checked. Try again.");
-  }
+  if (!response.ok) throw await responseError(response, "settings.check");
 
   try {
     const result = await response.json();
     if (!Array.isArray(result.models)) throw new Error();
     return result;
   } catch {
-    throw configurationFailure("Configuration could not be checked. Try again.");
+    throw failureError(malformedFailure("settings.check"));
   }
 }
 
@@ -565,7 +673,7 @@ async function checkPersistedConfiguration() {
     ready = false;
     tokenDraft = appliedConfiguration.token;
     setSettingsOpen(true);
-    showSettingsError(error.message);
+    showSettingsError(error.failure || connectionFailure("settings.check"), () => checkPersistedConfiguration());
     setStatus("Settings need attention.");
   } finally {
     setSettingsBusy(false);
@@ -578,19 +686,27 @@ async function revalidateCachedThread() {
   hydrating = true; setThreadControls(); setStatus("Restoring Thread…");
   try {
     const response = await fetch(`/threads/${state.threadId}/resume`, { method: "POST", headers: authorization() });
-    if (!response.ok) throw new Error();
-    const result = await response.json(); state = canonicalResumeState(result); olderCursor = result.olderCursor; persistedThreadConfiguration = true; saveState(); renderPreTurnConfiguration(); drawMessages({ forceFollow: true }); setStatus("");
-  } catch {
-    state = { threadId: null, messages: [], localNew: true, preTurnConfiguration: null };
-    olderCursor = null;
-    persistedThreadConfiguration = false;
-    saveState();
-    drawMessages({ forceFollow: true });
-    setStatus("The saved Thread is unavailable; returned to a new view.");
-    try {
-      await resolvePreTurnConfiguration();
-    } catch {
-      // The composer remains available; the first Turn will retry resolution.
+    if (!response.ok) throw await responseError(response, "thread.revalidate");
+    const result = await response.json().catch(() => { throw failureError(malformedFailure("thread.revalidate")); });
+    state = canonicalResumeState(result); olderCursor = result.olderCursor; persistedThreadConfiguration = true; threadRecoveryLocked = false; saveState(); renderPreTurnConfiguration(); drawMessages({ forceFollow: true }); setStatus("");
+  } catch (error) {
+    const failure = error.failure || connectionFailure("thread.revalidate");
+    if (failure.action === "start_new_thread") {
+      state = { threadId: null, messages: [], localNew: true, preTurnConfiguration: null };
+      olderCursor = null;
+      persistedThreadConfiguration = false;
+      threadRecoveryLocked = false;
+      saveState();
+      drawMessages({ forceFollow: true });
+      setStatus(`${failureText(failure)} Returned to a new view.`);
+      try {
+        await resolvePreTurnConfiguration();
+      } catch {
+        // The composer remains available; the first Turn will retry resolution.
+      }
+    } else {
+      threadRecoveryLocked = true;
+      showStatusFailure(failure, revalidateCachedThread, true);
     }
   } finally { hydrating = false; setThreadControls(); }
 }
@@ -631,7 +747,7 @@ applySettings.addEventListener("click", async () => {
   tokenDraft = token.value.trim();
   token.value = tokenDraft;
   if (!tokenDraft) {
-    showSettingsError("Enter an API token.");
+    showSettingsError(localFailure("mobile_client", "validation_failed", "settings.check", "Enter an API token."));
     return;
   }
 
@@ -656,11 +772,12 @@ applySettings.addEventListener("click", async () => {
     setSettingsOpen(false);
     setStatus("");
     if (tokenChanged && !state.threadId) await resolvePreTurnConfiguration();
+    if (state.activeTurn) void followActiveTurn();
   } catch (error) {
     appliedConfiguration = previousConfiguration;
     tokenDraft = previousConfiguration?.token || "";
     token.value = tokenDraft;
-    showSettingsError(error.message);
+    showSettingsError(error.failure || connectionFailure("settings.check"), () => applySettings.click());
   } finally {
     setSettingsBusy(false);
     setThreadControls();
@@ -695,20 +812,23 @@ applyConfiguration.addEventListener("click", async () => {
     const validationFailure = validateDraft(configurationDraft, configurationCatalog);
     if (validationFailure) {
       renderModelOptions();
-      showConfigurationError(validationFailure.message, validationFailure.field);
+      showConfigurationError(localFailure("mobile_client", "validation_failed", "configuration.resolve", validationFailure.message), validationFailure.field);
       return;
     }
 
     const response = await fetch("/configuration/resolve", { method: "POST", headers: { ...authorization(), "Content-Type": "application/json" }, body: JSON.stringify(resolutionRequest(configurationDraft)) });
     if (!response.ok) {
-      const failure = await response.json().catch(() => ({}));
-      for (const [name, message] of Object.entries(failure.fieldErrors || {})) {
+      const error = await responseError(response, "configuration.resolve");
+      for (const [name, message] of Object.entries(error.failure.fieldErrors || {})) {
         const field = configurationFields.get(name);
         if (field) { field.control.setAttribute("aria-invalid", "true"); field.error.textContent = message; }
       }
-      throw configurationFailure(failure.error || "Configuration could not be applied. Try again.");
+      const firstInvalid = Object.keys(error.failure.fieldErrors || {}).map((name) => configurationFields.get(name)?.control).find(Boolean);
+      if (firstInvalid) error.field = firstInvalid;
+      throw error;
     }
-    const resolved = await response.json();
+    const resolved = await response.json().catch(() => { throw failureError(malformedFailure("configuration.resolve")); });
+    if (!resolved?.configuration || typeof resolved.configurationRevision !== "string") throw failureError(malformedFailure("configuration.resolve"));
     appliedConfiguration = { ...configurationDraft, configurationRevision: resolved.configurationRevision };
     if (state.threadId) persistedThreadConfiguration = false;
     else {
@@ -722,7 +842,7 @@ applyConfiguration.addEventListener("click", async () => {
     setConfigurationOpen(false, configure);
     setStatus("");
   } catch (error) {
-    showConfigurationError(error.message, error.field);
+    showConfigurationError(error.failure || connectionFailure("configuration.resolve"), error.field, () => applyConfiguration.click());
   } finally {
     setConfigurationBusy(false);
     setThreadControls();
@@ -786,11 +906,22 @@ function drawMessages({ forceFollow = false } = {}) {
   const wasFollowing = forceFollow || (followThread && isNearBottom());
   const anchor = wasFollowing ? null : captureReadingAnchor();
   const existingActivity = messages.querySelector(".activity");
-  const nodes = state.messages.map(({ id, role, text, error, interrupted }) => {
+  const existingFailures = new Map([...messages.querySelectorAll(".message.error[data-item-id]")].map((node) => [node.dataset.itemId, node]));
+  const nodes = state.messages.map(({ id, role, text, error, interrupted, failure, retryPrompt }) => {
+    if (failure && id && existingFailures.has(id)) return existingFailures.get(id);
     const node = document.createElement("div");
     node.className = `message ${role}${error ? " error" : ""}${interrupted ? " interrupted" : ""}`;
     if (id) node.dataset.itemId = id;
-    appendMessageContent(node, role, text);
+    if (failure) {
+      renderFailure(node, failure, {
+        retry: retryPrompt ? () => {
+          prompt.value = retryPrompt;
+          resizePrompt();
+          composer.requestSubmit();
+        } : null,
+        announce: true,
+      });
+    } else appendMessageContent(node, role, text);
     if (interrupted) {
       const metadata = document.createElement("small");
       metadata.className = "message-metadata";
@@ -820,7 +951,7 @@ function drawMessages({ forceFollow = false } = {}) {
     }
     nodes.push(activity);
   } else lastAnnouncedActivity = null;
-  messages.replaceChildren(loadOlderHistory, ...nodes);
+  messages.replaceChildren(loadOlderHistory, ...(historyError.hidden ? [] : [historyError]), ...nodes);
   loadOlderHistory.hidden = !olderCursor;
   if (wasFollowing) {
     followThread = true;
@@ -848,10 +979,20 @@ async function loadHistory() {
   hydrating = true; setThreadControls(); loadOlderHistory.hidden = true;
   try {
     const query = new URLSearchParams({ cursor }); if (firstMessage?.id) query.set("anchorId", firstMessage.id);
-    const response = await fetch(`/threads/${state.threadId}/history?${query}`, { headers: authorization() }); if (!response.ok) throw new Error();
-    const result = await response.json(); const known = new Set(state.messages.map((message) => message.id)); state.messages = [...result.messages.filter((message) => !known.has(message.id)), ...state.messages]; olderCursor = result.olderCursor; saveState(); drawMessages();
+    historyError.hidden = true;
+    const response = await fetch(`/threads/${state.threadId}/history?${query}`, { headers: authorization() }); if (!response.ok) throw await responseError(response, "thread.history");
+    const result = await response.json().catch(() => { throw failureError(malformedFailure("thread.history")); });
+    if (!Array.isArray(result?.messages)) throw failureError(malformedFailure("thread.history"));
+    const known = new Set(state.messages.map((message) => message.id)); state.messages = [...result.messages.filter((message) => !known.has(message.id)), ...state.messages]; olderCursor = result.olderCursor; saveState(); drawMessages();
     const replacement = messages.children[result.messages.length + 1]; if (replacement && offset != null) messages.scrollTop += replacement.getBoundingClientRect().top - offset;
-  } catch { loadOlderHistory.hidden = false; loadOlderHistory.textContent = "Retry loading older history"; }
+  } catch (error) {
+    const failure = error.failure || connectionFailure("thread.history");
+    renderFailure(historyError, failure, { retry: loadHistory });
+    historyError.hidden = false;
+    loadOlderHistory.after(historyError);
+    loadOlderHistory.hidden = false;
+    loadOlderHistory.textContent = "Retry loading older history";
+  }
   finally { hydrating = false; setThreadControls(); }
 }
 loadOlderHistory.addEventListener("click", loadHistory);
@@ -893,6 +1034,7 @@ window.visualViewport?.addEventListener("scroll", updateVisualViewport);
 
 newThread.addEventListener("click", async () => {
   if (activeTurn || !ready) return;
+  threadRecoveryLocked = false;
   state = { threadId: null, messages: [], localNew: true, preTurnConfiguration: null };
   olderCursor = null;
   persistedThreadConfiguration = false;
@@ -909,7 +1051,7 @@ newThread.addEventListener("click", async () => {
     await resolvePreTurnConfiguration();
     setStatus("");
   } catch (error) {
-    setStatus(`Configuration could not be resolved: ${error.message}`);
+    showStatusFailure(error.failure || connectionFailure("configuration.resolve"), () => newThread.click());
   }
 });
 
@@ -931,7 +1073,7 @@ composer.addEventListener("submit", async (event) => {
       setStatus("Resolving configuration…");
       preTurnConfiguration = await resolvePreTurnConfiguration();
     } catch (error) {
-      setStatus(`Configuration could not be resolved: ${error.message}`);
+      showStatusFailure(error.failure || connectionFailure("configuration.resolve"), () => composer.requestSubmit());
       return;
     }
   }
@@ -966,10 +1108,47 @@ composer.addEventListener("submit", async (event) => {
 
 const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-async function responseError(response) {
-  let message = `${response.status} ${response.statusText}`.trim();
-  try { message = (await response.json()).error || message; } catch {}
-  const error = new Error(message); error.status = response.status; error.retryable = response.status >= 500; return error;
+function failureError(failure, statusCode = 0) {
+  const error = new Error(failure.message);
+  error.failure = failure;
+  error.status = statusCode;
+  error.retryable = failure.retryable;
+  return error;
+}
+
+function connectionFailure(operation, code = "relay_unreachable") {
+  return code === "stream_interrupted"
+    ? localFailure("connection", code, operation, "The Turn connection was interrupted. Reconnecting to the existing Turn.", "reconnect", true)
+    : localFailure("connection", code, operation, "Relay could not be reached. Check your connection and retry.", "retry", true);
+}
+
+function legacyFailure(response, body, operation) {
+  if (response.status === 401) return localFailure("relay", "authentication_rejected", operation, "The API token was rejected. Check it and try again.", "open_settings", false);
+  if (response.status === 404 && operation === "turn.recover") return localFailure("relay", "retained_turn_unavailable", operation, "This Turn is no longer retained.", "start_new_thread", false);
+  if (response.status === 404 && ["thread.resume", "thread.revalidate"].includes(operation)) return localFailure("relay", "state_conflict", operation, "The saved Thread is unavailable.", "start_new_thread", false);
+  if (response.status === 429 || response.status === 503) return localFailure("relay", "capacity_exceeded", operation, "Relay is busy. Retry in a moment.", "retry", true);
+  if ([400, 409].includes(response.status)) return localFailure("relay", response.status === 409 ? "state_conflict" : "request_invalid", operation, "The Relay could not accept this operation.", "none", false);
+  const message = operation === "settings.check"
+    ? (response.status === 502 ? "Configuration information is unavailable. Try again." : "Configuration could not be checked. Try again.")
+    : operation === "thread.list" ? "Threads could not be loaded. Try again."
+      : ["thread.resume", "thread.revalidate"].includes(operation) ? "The Thread could not be resumed. Try again."
+        : operation === "thread.history" ? "Older history could not be loaded. Try again."
+          : operation === "status.read" ? "Status could not be refreshed. Try again."
+            : "The Relay operation failed. Try again.";
+  return localFailure("unknown", "upstream_failure", operation, message, "retry", operation !== "turn.create");
+}
+
+async function responseError(response, operation) {
+  let body;
+  try { body = await response.json(); }
+  catch { return failureError(malformedFailure(operation), response.status); }
+  const failure = body?.failure
+    ? normalizeFailure(body.failure, operation)
+    : legacyFailure(response, body, operation);
+  if (!failure.fieldErrors && body?.fieldErrors && typeof body.fieldErrors === "object" && !Array.isArray(body.fieldErrors)) {
+    failure.fieldErrors = body.fieldErrors;
+  }
+  return failureError(failure, response.status);
 }
 
 function finishActiveTurn(statusMessage = "") {
@@ -978,9 +1157,14 @@ function finishActiveTurn(statusMessage = "") {
 
 function applyTurnEvent(turnEvent) {
   const turn = state.activeTurn;
-  if (!turn || !Number.isSafeInteger(turnEvent.sequence) || turnEvent.sequence <= turn.lastSequence) return false;
+  if (!turn || !Number.isSafeInteger(turnEvent.sequence)) throw failureError(malformedFailure("turn.stream"));
+  if (turnEvent.sequence <= turn.lastSequence) return false;
+  if (turnEvent.sequence !== turn.lastSequence + 1 || ![
+    "thread.started", "activity", "item.delta", "item.completed", "turn.retrying", "error", "relay.turn.finished",
+  ].includes(turnEvent.type)) throw failureError(malformedFailure("turn.stream"));
   turn.lastSequence = turnEvent.sequence;
   if (turnEvent.type === "thread.started") {
+    if (typeof turnEvent.thread_id !== "string") throw failureError(malformedFailure("turn.stream"));
     state.threadId = turnEvent.thread_id;
     state.localNew = false;
     renderPreTurnConfiguration();
@@ -1015,16 +1199,35 @@ function applyTurnEvent(turnEvent) {
     state.messages.push({ id: itemId, role: "assistant", text: `Error: ${String(item.text || "Turn failed")}`, error: true });
     turn.consumedItemIds.push(itemId);
   }
+  if (turnEvent.type === "turn.retrying") {
+    const failure = normalizeFailure(turnEvent.failure, "turn.stream");
+    turn.retryingFailure = failure;
+    setStatus(failureText(failure));
+  }
   if (turnEvent.type === "error") {
-    turn.error = turnEvent.message;
+    const failure = turnEvent.failure
+      ? normalizeFailure(turnEvent.failure, "turn.stream")
+      : localFailure("unknown", "upstream_failure", "turn.stream", "The Turn failed.", "retry", true);
+    turn.failure = failure;
     const errorId = turnEvent.id || `relay:${turn.id}:error`;
-    if (!state.messages.some(({ id }) => id === errorId)) state.messages.push({ id: errorId, role: "assistant", text: `Error: ${turnEvent.message}`, error: true });
+    if (!state.messages.some(({ id }) => id === errorId)) state.messages.push({
+      id: errorId,
+      role: "assistant",
+      text: failureText(failure),
+      error: true,
+      failure,
+      ...(failure.retryable && failure.action === "retry" ? { retryPrompt: turn.request.prompt } : {}),
+    });
   }
   if (turnEvent.type !== "relay.turn.finished") return false;
   if (turnEvent.status === "failed") {
     for (const message of state.messages) if (message.provisional) { message.interrupted = true; delete message.provisional; }
-    finishActiveTurn(turn.error ? `Codex failed: ${turn.error}` : "Codex failed");
-  } else finishActiveTurn();
+    finishActiveTurn("Turn failed.");
+  } else if (turnEvent.status === "interrupted") {
+    for (const message of state.messages) if (message.provisional) { message.interrupted = true; delete message.provisional; }
+    finishActiveTurn("Turn interrupted.");
+  } else if (turnEvent.status === "completed") finishActiveTurn();
+  else throw failureError(malformedFailure("turn.stream"));
   return true;
 }
 
@@ -1039,8 +1242,8 @@ async function followActiveTurn() {
         if (turn.stage === "starting") {
           const created = await fetch("/turn", { method: "POST", headers: { ...authorization(), "Content-Type": "application/json" }, body: JSON.stringify({ turnId: turn.id, ...turn.request }) });
           if (!created.ok) {
-            const error = await responseError(created);
-            if (error.status === 409 && !turn.request.threadId && /revision is obsolete/i.test(error.message)) {
+            const error = await responseError(created, "turn.create");
+            if (error.failure.code === "configuration_obsolete" && !turn.request.threadId) {
               const resolved = await resolvePreTurnConfiguration();
               turn.request = {
                 ...turn.request,
@@ -1058,23 +1261,57 @@ async function followActiveTurn() {
           turn.stage = "streaming"; saveState();
         }
         const response = await fetch(`/turn/${turn.id}/events?after=${turn.lastSequence}`, { headers: authorization() });
-        if (!response.ok) throw await responseError(response);
+        if (!response.ok) throw await responseError(response, "turn.recover");
+        delete turn.awaitingRecovery;
         setStatus("Codex is working…"); retryDelay = 500;
         const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = "";
         while (state.activeTurn) {
           const { value, done } = await reader.read(); buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
           const lines = buffer.split("\n"); buffer = lines.pop();
-          for (const line of lines) if (line && applyTurnEvent(JSON.parse(line))) return;
+          for (const line of lines) {
+            if (!line) continue;
+            let turnEvent;
+            try { turnEvent = JSON.parse(line); }
+            catch { throw failureError(malformedFailure("turn.stream")); }
+            if (applyTurnEvent(turnEvent)) return;
+          }
           saveState(); drawMessages();
-          if (done) throw new Error("Turn stream ended before completion");
+          if (done) throw failureError(connectionFailure("turn.stream", "stream_interrupted"));
         }
       } catch (error) {
-        if (error.retryable === false) {
-          state.messages = state.messages.filter((message) => !message.provisional);
-          finishActiveTurn(`Turn recovery unavailable: ${error.message}`);
+        const stage = state.activeTurn?.stage;
+        const failure = error.failure || connectionFailure(stage === "starting" ? "turn.create" : "turn.stream", stage === "starting" ? "relay_unreachable" : "stream_interrupted");
+        const canAutoRecover = failure.source === "connection"
+          && ((stage === "starting" && failure.code === "relay_unreachable") || (stage === "streaming" && failure.code === "stream_interrupted"));
+        const definitiveRecoveryFailure = stage === "streaming"
+          && failure.source === "relay"
+          && ["retained_turn_unavailable", "replay_position_invalid"].includes(failure.code);
+        if (!canAutoRecover && stage === "streaming" && !definitiveRecoveryFailure) {
+          state.activeTurn.awaitingRecovery = true;
+          setStatus(failureText(failure));
+          showStatusFailure(failure, failure.retryable ? followActiveTurn : null);
+          saveState();
+          drawMessages();
           return;
         }
-        setStatus("Connection lost. Reconnecting…"); saveState(); drawMessages(); await wait(retryDelay); retryDelay = Math.min(retryDelay * 2, 10_000);
+        if (!canAutoRecover) {
+          state.messages = state.messages.filter((message) => {
+            if (!message.provisional) return true;
+            if (!message.text.trim()) return false;
+            message.interrupted = true;
+            message.retainInterrupted = true;
+            delete message.provisional;
+            return true;
+          });
+          if (stage === "starting") {
+            prompt.value = state.activeTurn.request.prompt;
+            resizePrompt();
+          }
+          finishActiveTurn(failureText(failure));
+          showStatusFailure(failure, null, failure.action !== "start_new_thread");
+          return;
+        }
+        setStatus(failureText(failure)); saveState(); drawMessages(); await wait(retryDelay); retryDelay = Math.min(retryDelay * 2, 10_000);
       }
     }
   } finally { followingTurn = false; }
