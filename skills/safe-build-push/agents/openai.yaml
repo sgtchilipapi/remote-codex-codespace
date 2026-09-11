@@ -1,0 +1,4 @@
+interface:
+  display_name: "Safe Build & Push"
+  short_description: "Verify a deploy-style build, then push the verified commit"
+  default_prompt: "Use $safe-build-push to run the deployment build gate and push the verified commit to my branch."
