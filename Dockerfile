@@ -19,6 +19,8 @@ COPY package*.json ./
 RUN npm ci --omit=dev
 
 COPY server.js ./
+COPY device-auth.js ./
 COPY public ./public
+RUN node -e "require('./server')"
 
 CMD ["node", "server.js"]
